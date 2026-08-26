@@ -36,3 +36,10 @@ CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
 # 不正な名前として EINVAL で弾かれ、設定ファイルを作れない。
 CONFIG_FATFS_LFN_HEAP=y
 CONFIG_FATFS_MAX_LFN=255
+
+# 旧 I2C ドライバとの衝突検査を外す。
+# BSP は新しい I2C ドライバを使い、実行時に触るのはこちらだけ。一方
+# esp-idf-hal が I2cDriver の後始末関数を参照しているために旧ドライバが
+# リンクされ、起動時の検査が両方あると見なして中止してしまう。
+# 旧ドライバは呼ばれないため、この検査を外して問題ない。
+CONFIG_I2C_SKIP_LEGACY_CONFLICT_CHECK=y

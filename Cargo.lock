@@ -1033,7 +1033,6 @@ name = "m5a-core"
 version = "0.1.0"
 dependencies = [
  "base64",
- "embedded-graphics",
  "serde",
  "serde_json",
  "toml",

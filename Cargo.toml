@@ -35,5 +35,13 @@ embassy-time = { version = "0.5", features = ["generic-queue-8"] }
 [build-dependencies]
 embuild = "0.33"
 
+# CoreS3 の公式 BSP を取り込む。電源IC・LCD・タッチ・SD・音声コーデックと
+# LVGL の結線をまとめて引き受けてくれる。LCD の DC と microSD の MISO が
+# 同じ端子を分け合う問題も BSP 側で処理される。
+[[package.metadata.esp-idf-sys.extra_components]]
+remote_component = { name = "espressif/m5stack_core_s3", version = "^4.0" }
+bindings_header = "bindings_bsp.h"
+bindings_module = "bsp"
+
 [workspace]
 members = ["core"]

@@ -7,33 +7,9 @@ use std::fs;
 use std::io::Write as _;
 use std::path::PathBuf;
 
-use anyhow::{Context, Result};
-use esp_idf_svc::fs::fatfs::Fatfs;
-use esp_idf_svc::hal::sd::spi::SdSpiHostDriver;
-use esp_idf_svc::hal::sd::SdCardDriver;
-use esp_idf_svc::hal::spi::SpiDriver;
-use esp_idf_svc::io::vfs::MountedFatfs;
 use m5a_core::ports::{Storage, StorageError};
 
-/// カードを見せる場所。コア層はこの前置きを知らない。
-pub const MOUNT_POINT: &str = "/sdcard";
-/// 同時に開けるファイル数。設定とログしか扱わないので少なくてよい。
-const MAX_OPEN_FILES: usize = 4;
-
-type Card<'d> = SdCardDriver<SdSpiHostDriver<'d, SpiDriver<'d>>>;
-
-/// マウント中のカード。落とすと自動的に取り外される。
-pub type MountedCard<'d> = MountedFatfs<Fatfs<Card<'d>>>;
-
-/// カードをマウントする。
-pub fn mount_sd_card<'d>(host: SdSpiHostDriver<'d, SpiDriver<'d>>) -> Result<MountedCard<'d>> {
-    let card = SdCardDriver::new_spi(host, &Default::default())
-        .context("SDカードを認識できません。カードが入っているか確かめてください")?;
-    let filesystem = Fatfs::new_sdcard(0, card).context("SDカードの形式を読めません")?;
-
-    MountedFatfs::mount(filesystem, MOUNT_POINT, MAX_OPEN_FILES)
-        .context("SDカードをマウントできません。FAT32で初期化されているか確かめてください")
-}
+use super::board::SD_MOUNT_POINT;
 
 /// コア層に見せるカード上のファイル操作。
 #[derive(Debug, Default)]
@@ -45,7 +21,7 @@ impl SdStorage {
     }
 
     fn absolute(path: &str) -> PathBuf {
-        PathBuf::from(format!("{MOUNT_POINT}{path}"))
+        PathBuf::from(format!("{SD_MOUNT_POINT}{path}"))
     }
 }
 

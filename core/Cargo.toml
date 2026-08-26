@@ -9,4 +9,3 @@ serde = { version = "1", features = ["derive"] }
 toml = "0.8"
 serde_json = "1"
 base64 = "0.22"
-embedded-graphics = "0.8"
