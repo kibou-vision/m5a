@@ -50,6 +50,8 @@ pub mod mock {
         dirs: BTreeSet<String>,
         /// 書き込みを常に失敗させ、SDカード異常時の経路を検証する。
         pub fail_writes: bool,
+        /// 成功を返しつつ内容を捨て、壊れたカードの挙動を再現する。
+        pub discard_writes: bool,
     }
 
     impl MemoryStorage {
@@ -84,6 +86,9 @@ pub mod mock {
         fn write_text(&mut self, path: &str, contents: &str) -> Result<(), StorageError> {
             if self.fail_writes {
                 return Err(StorageError::Io("書き込み禁止".to_string()));
+            }
+            if self.discard_writes {
+                return Ok(());
             }
             self.files.insert(path.to_string(), contents.to_string());
             Ok(())

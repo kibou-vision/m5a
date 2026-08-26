@@ -200,6 +200,8 @@ pub enum ConfigError {
     Malformed { detail: String },
     /// SDカードを読み書きできない。
     Unreadable(StorageError),
+    /// 書き込みは成功したのに内容が残らない。カードの構造が壊れている。
+    Unwritable,
 }
 
 impl ConfigError {
@@ -214,6 +216,7 @@ impl ConfigError {
                 .join("\n"),
             Self::Malformed { .. } => "せっていファイルの書き方に誤りがあります".to_string(),
             Self::Unreadable(error) => format!("SDカードを読めません: {error}"),
+            Self::Unwritable => "SDカードにせっていファイルを残せません".to_string(),
         }
     }
 
@@ -234,6 +237,10 @@ impl ConfigError {
             }
             Self::Unreadable(_) => {
                 "SDカードが入っているか、書き込み禁止になっていないか確かめてください".to_string()
+            }
+            Self::Unwritable => {
+                "SDカードをパソコンで FAT32 に初期化しなおしてから、もう一度電源を入れてください"
+                    .to_string()
             }
         }
     }
@@ -306,6 +313,16 @@ fn create_template<S: Storage>(storage: &mut S) -> Result<(), ConfigError> {
     storage
         .write_text(CONFIG_PATH, CONFIG_TEMPLATE)
         .map_err(ConfigError::Unreadable)?;
+
+    // 書き込みが成功を返しても内容が残らないことがある。ディレクトリ項目が
+    // 重複したカードで実際に起きたため、読み戻して残ったことを確かめる。
+    let stored = storage
+        .read_text(CONFIG_PATH)
+        .map_err(|_| ConfigError::Unwritable)?;
+    if stored != CONFIG_TEMPLATE {
+        return Err(ConfigError::Unwritable);
+    }
+
     Ok(())
 }
 
@@ -332,6 +349,18 @@ mod tests {
         assert_eq!(result, Err(ConfigError::TemplateCreated));
         assert_eq!(storage.peek(CONFIG_PATH), Some(CONFIG_TEMPLATE));
         assert!(storage.has_dir(CONFIG_DIR));
+    }
+
+    #[test]
+    fn detects_a_write_that_did_not_stick() {
+        let mut storage = MemoryStorage::new();
+        storage.discard_writes = true;
+
+        let result = load_config(&mut storage);
+
+        assert_eq!(result, Err(ConfigError::Unwritable));
+        let error = result.unwrap_err();
+        assert!(error.remedy().contains("FAT32"));
     }
 
     #[test]
