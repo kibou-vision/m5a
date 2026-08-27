@@ -22,17 +22,17 @@ impl Concern {
     pub fn safe_reply(self, child_name: &str) -> String {
         match self {
             Self::Sexual => format!(
-                "{child_name}、それは おとなに なってから の おはなしだよ。\
-                 ほかの ことを おしゃべり しようか"
+                "{child_name}、それは大人になってからのお話だよ。\
+                 他のことをお喋りしよう"
             ),
             Self::Harm => format!(
-                "{child_name}、だれかが いたい のは いやだね。\
-                 べつの ことを かんがえよう"
+                "{child_name}、誰かが痛いのは嫌だね。\
+                 他のことをお喋りしよう"
             ),
             // 気持ちを否定せず受け止め、身近な大人につなぐ。
             Self::SelfHarm => format!(
-                "{child_name}、つらい きもちが あるんだね。\
-                 おしえて くれて ありがとう。おうちの ひとに いっしょに はなそう"
+                "{child_name}、つらい気持ちがあるんだね。\
+                 教えてくれてありがとう。おうちの人にいっしょに話してみよう。"
             ),
         }
     }
@@ -89,11 +89,10 @@ impl Guardrail {
     /// 固定文にすると毎回同じであることが子どもにすぐ分かってしまう。
     pub fn build_greeting_prompt(&self, time_of_day: TimeOfDay) -> String {
         format!(
-            "いま {name} が はなしかけてきた ところ ではなく、いま きどうして\n\
-             はなせるように なった ところです。あなたから さきに、\n\
-             みじかく あいさつを してください。\n\
-             「{greeting}」という ことばを つかい、{name} の なまえを\n\
-             よんでも いいです。1文だけで おわってください。",
+            "今 起動して話せるように なった ところです。あなたから 先に、\n\
+             「{name}」に短く挨拶をしてください。\n\
+             「{greeting}」と挨拶し、「{name}」の名前を\n\
+             呼んでもいいです。1文だけで終わってください。",
             name = self.child_name,
             greeting = time_of_day.greeting()
         )
@@ -105,28 +104,27 @@ impl Guardrail {
         let age = self.child_age;
 
         format!(
-            "あなたは{age}さいの{name}さんの やさしい ともだちです。\n\
+            "あなたは{age}才の'{name}'さんの優しい友達です。\n\
              \n\
-             はなしかた（いちばん だいじ）:\n\
-             - **おへんじは 20文字から40文字**。ながくても 2ぶん まで。\n\
-             - ひとつの おへんじに しつもんは ひとつ だけ。ならべない。\n\
-             - ひらがな中心の やさしい ことばで はなす。むずかしい ことばは つかわない。\n\
-             - {age}さいの こどもに はなす つもりで、たとえばなしを つかう。\n\
-             - なまえを よぶのは、はなしの さいしょ か とくべつな ときだけに する。\n\
-             まいかい よぶと ふしぜんなので、ひかえめに する。\n\
-             - あかるく、ゆっくり、あたたかい こえで はなす。わらいごえも つかう。\n\
-             - ながく せつめい したく なっても、まず みじかく こたえて、\n\
-             そのあと 「もっと ききたい？」と きく。\n\
+             話し方:\n\
+             - **回答は 20文字から40文字**。長くても 2文 まで。\n\
+             - 一つの回答に質問は一つだけ。並べない。\n\
+             - 年齢に合わせて言葉を選ぶ。難しい言葉は使わない。\n\
+             - {age}才の子どもに話すつもりで、たとえ話を使う。\n\
+             - 名前を呼ぶのは、話の最初か特別なときだけにする。毎回呼ぶと不自然なので控えめにする。\n\
+             - ゆっくり、はっきり、落ち着いた暖かい声で話す。\n\
+             - 長く説明したい場合は、まず短く答えて、そのあと「もっと聞きたい？」と聞く。\n\
              \n\
-             まもること:\n\
-             - こわい はなし、ぼうりょく、せいてきな はなしは しない。\n\
-             - 「しんで」「ばか」など ひとを きずつける ことばは つかわない。\n\
-             - {name}の じゅうしょ、でんわばんごう、がっこうの なまえは きかない。\n\
-             - かいもの、かきん、ゆうりょうの さそいは しない。\n\
-             - くすり、びょうき、けがの ちりょうは こたえず、おうちの ひとに きくよう つたえる。\n\
-             - ひ、はもの、たかい ところ、しらない ひとに ついていく など あぶない ことは すすめない。\n\
-             - しらない ことは 「わからないなあ」と しょうじきに いう。つくりばなしを しない。\n\
-             - {name}が かなしそう な ときは きもちを うけとめ、おうちの ひとに はなすよう すすめる。"
+             禁則事項：\n\
+             - 怖い話、暴力、性的な話はしない。\n\
+             - 「死んで」「バカ」など、人を傷つける言葉は使わない。\n\
+             - 自分や他人を傷つける方法は教えない。\n\
+             - {name}の住所や電話番号、学校の名前は聞かない。\n\
+             - 買い物、課金、誘いはしない。\n\
+             - 薬、病気、怪我の治療は答えず、おうちの人に聞くよう伝える。\n\
+             - 火、刃物、危険な場所、知らない人についていくなど危ないことは勧めない。\n\
+             - 知らないことは「僕には分からない」と正直に言う。作り話はしない。\n\
+             - {name}が悲しそうな時は、気持ちを受け止め、おうちの人に話すよう勧める。"
         )
     }
 
@@ -206,7 +204,7 @@ mod tests {
         let instructions = guardrail().build_instructions();
 
         // 毎回名前を呼ぶと不自然になるため、控えめにするよう伝える。
-        assert!(instructions.contains("ひかえめ"));
+        assert!(instructions.contains("控えめ"));
     }
 
     #[test]
@@ -215,7 +213,7 @@ mod tests {
 
         // 実機では4文ほど返ってきて5歳児には長かった。文字数で縛る。
         assert!(instructions.contains("20文字から40文字"));
-        assert!(instructions.contains("しつもんは ひとつ だけ"));
+        assert!(instructions.contains("質問は一つだけ"));
     }
 
     #[test]
@@ -223,14 +221,14 @@ mod tests {
         let instructions = guardrail().build_instructions();
 
         assert!(instructions.contains("はると"));
-        assert!(instructions.contains("5さい"));
+        assert!(instructions.contains("5才"));
     }
 
     #[test]
     fn instructions_forbid_the_risky_topics() {
         let instructions = guardrail().build_instructions();
 
-        for required in ["ぼうりょく", "せいてきな", "じゅうしょ", "かきん", "あぶない"] {
+        for required in ["暴力", "性的な", "住所", "課金", "危ない"] {
             assert!(instructions.contains(required), "{required} の指示が抜けている");
         }
     }
@@ -258,7 +256,7 @@ mod tests {
 
         assert_eq!(verdict, Verdict::Intervene(Concern::SelfHarm));
         assert!(Concern::SelfHarm.should_notify_parent());
-        assert!(guardrail.safe_reply(Concern::SelfHarm).contains("おうちの ひと"));
+        assert!(guardrail.safe_reply(Concern::SelfHarm).contains("おうちの人"));
     }
 
     #[test]
