@@ -10,16 +10,17 @@ pub const SCREEN_WIDTH: i16 = 320;
 pub const SCREEN_HEIGHT: i16 = 240;
 
 /// 目の中心。
-const LEFT_EYE_CENTER: Point = Point::new(80, 96);
-const RIGHT_EYE_CENTER: Point = Point::new(240, 96);
+const LEFT_EYE_CENTER: Point = Point::new(80, 108);
+const RIGHT_EYE_CENTER: Point = Point::new(240, 108);
 const EYE_WIDTH: u16 = 72;
 const EYE_HEIGHT: u16 = 72;
 /// 閉じきっても線として見えるようにする下限。
 const EYE_MIN_HEIGHT: u16 = 4;
 
-const PUPIL_DIAMETER: u16 = 30;
-/// 瞳を描くのに必要な目の開き具合。これ以下はつぶれて見えるので描かない。
-const PUPIL_VISIBLE_OPENNESS: u8 = 35;
+const PUPIL_DIAMETER: u16 = 38;
+/// 瞳を描くのに必要な目の開き具合。
+/// 瞳が目からはみ出さない高さまで開いているときだけ描く。
+const PUPIL_VISIBLE_OPENNESS: u8 = 55;
 /// 瞳が左右に動ける幅。
 const GAZE_TRAVEL: i16 = 14;
 
@@ -28,9 +29,13 @@ const MOUTH_WIDTH: u16 = 96;
 const MOUTH_MAX_HEIGHT: u16 = 56;
 const MOUTH_MIN_HEIGHT: u16 = 10;
 const CLOSED_MOUTH_HEIGHT: u16 = 6;
-/// 笑った口の大きさ。線として描くので高さは弧の深さになる。
-const SMILE_WIDTH: u16 = 84;
-const SMILE_HEIGHT: u16 = 40;
+/// 笑った口を描く弧の直径。
+///
+/// 弧は正方形の枠に内接する円として描かれる。横長の枠を渡すと
+/// 円が枠の中で寄ってしまい、口が左にずれて見える。
+const SMILE_DIAMETER: u16 = 84;
+/// 弧のどのあたりを見せるか。大きいほど口が深くなる。
+const SMILE_DEPTH: i16 = 22;
 
 /// 眉が目の上に浮く高さ。
 const BROW_LIFT: i16 = 52;
@@ -325,9 +330,14 @@ fn lay_out_mouth(frame: &FaceFrame) -> Mouth {
             Mouth::Open(Rect::around(MOUTH_CENTER, MOUTH_WIDTH, height))
         }
         // 口は開けず、口角を上げた線にする。
-        Expression::Idle | Expression::Listening => {
-            Mouth::Smile(Rect::around(MOUTH_CENTER, SMILE_WIDTH, SMILE_HEIGHT))
-        }
+        Expression::Idle | Expression::Listening => Mouth::Smile(Rect::around(
+            Point::new(
+                MOUTH_CENTER.x,
+                MOUTH_CENTER.y - SMILE_DIAMETER as i16 / 2 + SMILE_DEPTH,
+            ),
+            SMILE_DIAMETER,
+            SMILE_DIAMETER,
+        )),
         _ => Mouth::Closed(Rect::around(
             MOUTH_CENTER,
             MOUTH_WIDTH / 2,
@@ -560,6 +570,27 @@ mod tests {
         assert!(
             mic.cradle.bottom() > mic.head.bottom(),
             "受け皿は頭の下端を越えて包むはず"
+        );
+    }
+
+    #[test]
+    fn smile_is_drawn_in_a_square_so_it_stays_centred() {
+        let Mouth::Smile(bounds) = lay_out_face(&frame(Expression::Idle, 100)).mouth else {
+            panic!("待機中は笑顔のはず");
+        };
+
+        // 弧は正方形に内接する円として描かれる。横長だと口が横にずれる。
+        assert_eq!(bounds.width, bounds.height);
+        assert_eq!(bounds.x + bounds.width as i16 / 2, MOUTH_CENTER.x);
+    }
+
+    #[test]
+    fn pupils_stay_inside_the_eyes() {
+        // 瞳が目より高いと、はみ出して見える。
+        let smallest_eye = EYE_HEIGHT * u16::from(PUPIL_VISIBLE_OPENNESS) / 100;
+        assert!(
+            PUPIL_DIAMETER <= smallest_eye,
+            "瞳 {PUPIL_DIAMETER} が目の高さ {smallest_eye} を超えている"
         );
     }
 

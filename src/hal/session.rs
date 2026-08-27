@@ -16,10 +16,12 @@ use m5a_core::realtime::{self, ServerEvent, SessionSetup};
 
 /// 受信バッファ。
 ///
-/// esp-idf-svc はこれを超える電文を組み立て直せず、切れた JSON がそのまま
-/// 届いてしまう。実測では音声の断片が 4KB を超えており、切り詰めると
-/// 応答の音声が丸ごと失われた。余裕を持たせること。
-const RECEIVE_BUFFER: usize = 16 * 1024;
+/// これを超える電文は分割されて届く。組み立て直しはこちらで行うため、
+/// 内部メモリを空けられる大きさに留める。
+const RECEIVE_BUFFER: usize = 8 * 1024;
+/// 組み立て中の電文が膨らみすぎたら諦める大きさ。
+/// 断片を取りこぼすと永久に完成しないため、上限を設けて捨てる。
+const MAX_ASSEMBLED: usize = 128 * 1024;
 /// 接続を待つ上限。
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
 /// 通信が滞ったとみなすまでの時間。指定しないと警告とともに既定値が使われる。
@@ -58,8 +60,11 @@ impl Session {
             ..Default::default()
         };
 
+        // 分割された電文を継ぎ足す場所。受信を捌く仕事の中だけで使う。
+        let mut assembling = String::new();
+
         let client = EspWebSocketClient::new(&url, &config, CONNECT_TIMEOUT, move |event| {
-            forward(event, &sender);
+            forward(event, &sender, &mut assembling);
         })
         .context("OpenAI に繋がりません。APIキーとネットワークを確かめてください")?;
 
@@ -87,15 +92,38 @@ impl Session {
 
 }
 
-/// 電文の頭だけを取り出す。全文を出すと画面外に流れて読めなくなる。
-fn head_of(payload: &str) -> String {
-    payload.chars().take(120).collect()
+/// 届いた断片を継ぎ足し、電文として読めたら流す。
+///
+/// 受信バッファを超える電文は複数回に分けて届く。使っている
+/// WebSocket の実装は分割の情報を渡してくれないため、
+/// 「読めるようになるまで継ぎ足す」ことで組み立て直す。
+fn assemble(payload: &str, sender: &Sender<ServerEvent>, assembling: &mut String) {
+    assembling.push_str(payload);
+
+    match realtime::parse_server_event(assembling) {
+        Ok(ServerEvent::Ignored) => assembling.clear(),
+        Ok(parsed) => {
+            assembling.clear();
+            let _ = sender.send(parsed);
+        }
+        Err(_) if assembling.len() >= MAX_ASSEMBLED => {
+            // 断片を取りこぼすと永久に完成しない。捨てて次の電文に備える。
+            log::warn!("電文を組み立てられないので捨てました（{} バイト）", assembling.len());
+            assembling.clear();
+        }
+        // まだ途中。次の断片を待つ。
+        Err(_) => {}
+    }
 }
 
 /// 受信した電文を解釈して待ち行列へ流す。
 ///
 /// この関数は受信用の仕事から呼ばれる。重い処理はせず、渡すだけにする。
-fn forward(event: &Result<WebSocketEvent<'_>, esp_idf_svc::io::EspIOError>, sender: &Sender<ServerEvent>) {
+fn forward(
+    event: &Result<WebSocketEvent<'_>, esp_idf_svc::io::EspIOError>,
+    sender: &Sender<ServerEvent>,
+    assembling: &mut String,
+) {
     let Ok(event) = event else {
         // 接続の途中経過でも失敗として届くため、記録に留める。
         log::debug!("受信に失敗しました");
@@ -104,22 +132,7 @@ fn forward(event: &Result<WebSocketEvent<'_>, esp_idf_svc::io::EspIOError>, send
 
     match event.event_type {
         WebSocketEventType::Text(payload) => {
-            // 音声の断片が毎秒いくつも届くため、中身は必要なときだけ見る。
-            log::debug!("受信 {} バイト: {}", payload.len(), head_of(payload));
-
-            match realtime::parse_server_event(payload) {
-                Ok(ServerEvent::Ignored) => {}
-                Ok(parsed) => {
-                    let _ = sender.send(parsed);
-                }
-                // 受信バッファぎりぎりで切れているなら、まず大きさを疑う。
-                Err(_) if payload.len() >= RECEIVE_BUFFER - 1 => log::warn!(
-                    "電文が受信バッファ({RECEIVE_BUFFER} バイト)に収まりませんでした。\
-                     RECEIVE_BUFFER を大きくしてください"
-                ),
-                // 電文を1つ読み違えても対話は続けられる。
-                Err(error) => log::warn!("電文を解釈できません: {}", error.detail),
-            }
+            assemble(payload, sender, assembling);
         }
         WebSocketEventType::Binary(payload) => {
             log::info!("二進の受信 {} バイト", payload.len());
