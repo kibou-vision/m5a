@@ -61,3 +61,18 @@ pub fn mount_sd_card() -> Result<()> {
 pub fn touch_device() -> *mut bsp::lv_indev_t {
     unsafe { bsp::bsp_display_get_input_dev() }
 }
+
+/// いま使える内部メモリの様子。連続して確保できる大きさが要点になる。
+///
+/// LVGL の描画バッファと Wi-Fi が内部 DRAM を大きく使うため、
+/// あとから仕事を作れなくなることがある。
+pub fn report_memory(stage: &str) {
+    let free = unsafe { esp_idf_svc::sys::esp_get_free_heap_size() };
+    let largest = unsafe {
+        esp_idf_svc::sys::heap_caps_get_largest_free_block(
+            esp_idf_svc::sys::MALLOC_CAP_INTERNAL | esp_idf_svc::sys::MALLOC_CAP_8BIT,
+        )
+    };
+
+    log::info!("メモリ[{stage}]: 空き {free} バイト / 内部の最大連続 {largest} バイト");
+}

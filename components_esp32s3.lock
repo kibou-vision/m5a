@@ -187,6 +187,16 @@ dependencies:
     - esp32c6
     - esp32c61
     version: 2.0.1
+  espressif/esp_websocket_client:
+    component_hash: dc00233af846f3a744ada283a300e0d586040aadc3ee67361645ecdce4523672
+    dependencies:
+    - name: idf
+      require: private
+      version: '>=5.0'
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    version: 1.8.0
   espressif/i2c_bus:
     component_hash: 483112c1619c54c38d0b734fb25f1678733267858a77b7af2f48cc7db6dbbd84
     dependencies:
@@ -315,7 +325,8 @@ dependencies:
       type: service
     version: 9.5.0
 direct_dependencies:
+- espressif/esp_websocket_client
 - espressif/m5stack_core_s3
-manifest_hash: d18e6258dcb774d3022e9a99c7ddb2ac8fff4ffddf138bc9542b2c275fea25b6
+manifest_hash: 5b5004fa0de17f7f7680e6cf0a5a2de0f2c78658865af6d5209a1579b6cdf2b5
 target: esp32s3
 version: 2.0.0

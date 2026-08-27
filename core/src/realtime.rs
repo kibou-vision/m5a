@@ -29,8 +29,10 @@ pub struct SessionSetup {
 /// サーバから届いた出来事。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ServerEvent {
-    /// セッションが使える状態になった。
-    SessionReady,
+    /// 接続できた。ここで設定を送る。
+    SessionCreated,
+    /// こちらの設定が反映された。ここから話しかけられる。
+    SessionConfigured,
     /// 応答音声の断片。復号済みの生バイト。
     AudioDelta(Vec<u8>),
     /// アシスタントの発話の文字起こし（断片）。
@@ -136,7 +138,9 @@ pub fn parse_server_event(payload: &str) -> Result<ServerEvent, ProtocolError> {
     };
 
     let event = match event_type {
-        "session.created" | "session.updated" => ServerEvent::SessionReady,
+        // 接続直後に session.created が届く。設定を送るのはこれを見てから。
+        "session.created" => ServerEvent::SessionCreated,
+        "session.updated" => ServerEvent::SessionConfigured,
 
         "response.output_audio.delta" => match take_base64(&value, "delta") {
             Some(audio) => ServerEvent::AudioDelta(audio),
@@ -335,12 +339,22 @@ mod tests {
     #[test]
     fn reads_session_and_response_lifecycle() {
         for (payload, expected) in [
-            (json!({"type": "session.created"}), ServerEvent::SessionReady),
-            (json!({"type": "session.updated"}), ServerEvent::SessionReady),
+            (json!({"type": "session.created"}), ServerEvent::SessionCreated),
+            (json!({"type": "session.updated"}), ServerEvent::SessionConfigured),
             (json!({"type": "response.done"}), ServerEvent::ResponseFinished),
         ] {
             assert_eq!(parse_server_event(&payload.to_string()), Ok(expected));
         }
+    }
+
+    #[test]
+    fn separates_connecting_from_being_configured() {
+        // 接続直後の session.created で設定を送り、session.updated で話し始める。
+        // ひとまとめにすると、設定が届く前に話しかけてしまう。
+        assert_ne!(
+            parse_server_event(&json!({"type": "session.created"}).to_string()),
+            parse_server_event(&json!({"type": "session.updated"}).to_string())
+        );
     }
 
     #[test]

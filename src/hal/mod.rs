@@ -2,5 +2,7 @@
 
 pub mod board;
 pub mod face;
+pub mod session;
 pub mod storage;
 pub mod touch;
+pub mod wifi;

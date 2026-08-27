@@ -43,5 +43,10 @@ remote_component = { name = "espressif/m5stack_core_s3", version = "^4.0" }
 bindings_header = "bindings_bsp.h"
 bindings_module = "bsp"
 
+# Realtime API へ繋ぐ WebSocket クライアント。
+# esp-idf-svc の ws::client はこのコンポーネントがある時だけ有効になる。
+[[package.metadata.esp-idf-sys.extra_components]]
+remote_component = { name = "espressif/esp_websocket_client", version = "^1.5" }
+
 [workspace]
 members = ["core"]

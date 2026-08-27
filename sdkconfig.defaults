@@ -43,3 +43,9 @@ CONFIG_FATFS_MAX_LFN=255
 # リンクされ、起動時の検査が両方あると見なして中止してしまう。
 # 旧ドライバは呼ばれないため、この検査を外して問題ない。
 CONFIG_I2C_SKIP_LEGACY_CONFLICT_CHECK=y
+
+# LVGL の描画バッファを小さくする。
+# 既定の 100 行だと 320x100x2 = 64KB を2枚使い、内部 DRAM の最大連続ブロックが
+# 31KB まで落ちて WebSocket の受信タスクを作れなくなる。部分更新なので
+# 行数を減らしても見た目は変わらない。
+CONFIG_BSP_LCD_DRAW_BUF_HEIGHT=40
