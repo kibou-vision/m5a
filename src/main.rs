@@ -9,6 +9,7 @@ use esp_idf_svc::hal::peripherals::Peripherals;
 use esp_idf_svc::sntp::EspSntp;
 
 use m5a_core::config::{self, Config, ConfigError};
+use m5a_core::greeting::TimeOfDay;
 use m5a_core::face::{Expression, FaceAnimator};
 use m5a_core::guardrail::{Guardrail, Verdict};
 use m5a_core::layout;
@@ -255,6 +256,20 @@ impl Runtime {
         }
     }
 
+    /// 話せるようになった最初に、こちらからあいさつする。
+    ///
+    /// 子どもが最初の一言を考えなくてよいようにする。会話ログの記録は
+    /// 通常のやり取りと同じ経路（AssistantSaid の集約）で行われる。
+    fn greet(&mut self) {
+        let Some(guardrail) = self.guardrail.as_ref() else {
+            return;
+        };
+        let time_of_day = TimeOfDay::at(wifi::now_unix());
+        let prompt = guardrail.build_greeting_prompt(time_of_day);
+
+        self.tell(&realtime::build_response_create_with_instructions(&prompt));
+    }
+
     /// 接続が確立したので、こちらの設定を送る。
     fn configure_session(&mut self) {
         let Some(setup) = self.setup.take() else {
@@ -326,7 +341,10 @@ impl Runtime {
                 self.configure_session();
                 None
             }
-            ServerEvent::SessionConfigured => Some(AppEvent::SessionOpened),
+            ServerEvent::SessionConfigured => {
+                self.greet();
+                Some(AppEvent::SessionOpened)
+            }
             ServerEvent::AudioDelta(audio) => {
                 if let Some(player) = self.audio.as_ref() {
                     player.play(audio);

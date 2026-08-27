@@ -4,6 +4,8 @@
 //! 指示文が効かなかったときの受け皿であり、誤検出で子供の素朴な質問を
 //! 遮ってしまわないよう、明らかに危険な語だけに絞っている。
 
+use crate::greeting::TimeOfDay;
+
 /// 気づかいが必要な話題。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Concern {
@@ -81,20 +83,37 @@ impl Guardrail {
         }
     }
 
+    /// 起動して話せるようになったときに、こちらから声をかけるための指示。
+    ///
+    /// 何を話すかの大枠だけ決め、実際の言い回しはモデルに任せる。
+    /// 固定文にすると毎回同じであることが子どもにすぐ分かってしまう。
+    pub fn build_greeting_prompt(&self, time_of_day: TimeOfDay) -> String {
+        format!(
+            "いま {name} が はなしかけてきた ところ ではなく、いま きどうして\n\
+             はなせるように なった ところです。あなたから さきに、\n\
+             みじかく あいさつを してください。\n\
+             「{greeting}」という ことばを つかい、{name} の なまえを\n\
+             よんでも いいです。1文だけで おわってください。",
+            name = self.child_name,
+            greeting = time_of_day.greeting()
+        )
+    }
+
     /// セッションに渡す指示文を組み立てる。
     pub fn build_instructions(&self) -> String {
         let name = &self.child_name;
         let age = self.child_age;
 
         format!(
-            "あなたは{age}さいの{name}さんの やさしい おともだちです。\n\
+            "あなたは{age}さいの{name}さんの やさしい ともだちです。\n\
              \n\
              はなしかた（いちばん だいじ）:\n\
              - **おへんじは 20文字から40文字**。ながくても 2ぶん まで。\n\
              - ひとつの おへんじに しつもんは ひとつ だけ。ならべない。\n\
              - ひらがな中心の やさしい ことばで はなす。むずかしい ことばは つかわない。\n\
              - {age}さいの こどもに はなす つもりで、たとえばなしを つかう。\n\
-             - ときどき 「{name}」と なまえを よんで はなしかける。まいかい では ない。\n\
+             - なまえを よぶのは、はなしの さいしょ か とくべつな ときだけに する。\n\
+             まいかい よぶと ふしぜんなので、ひかえめに する。\n\
              - あかるく、ゆっくり、あたたかい こえで はなす。わらいごえも つかう。\n\
              - ながく せつめい したく なっても、まず みじかく こたえて、\n\
              そのあと 「もっと ききたい？」と きく。\n\
@@ -168,6 +187,26 @@ mod tests {
 
     fn guardrail() -> Guardrail {
         Guardrail::new("はると", 5)
+    }
+
+    #[test]
+    fn greeting_prompt_carries_the_time_of_day_and_name() {
+        let guardrail = guardrail();
+
+        for time_of_day in [TimeOfDay::Morning, TimeOfDay::Afternoon, TimeOfDay::Evening] {
+            let prompt = guardrail.build_greeting_prompt(time_of_day);
+
+            assert!(prompt.contains(time_of_day.greeting()), "{time_of_day:?}");
+            assert!(prompt.contains("はると"));
+        }
+    }
+
+    #[test]
+    fn instructions_ask_to_use_the_name_sparingly() {
+        let instructions = guardrail().build_instructions();
+
+        // 毎回名前を呼ぶと不自然になるため、控えめにするよう伝える。
+        assert!(instructions.contains("ひかえめ"));
     }
 
     #[test]

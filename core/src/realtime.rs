@@ -120,6 +120,18 @@ pub fn build_response_create() -> String {
     json!({ "type": "response.create" }).to_string()
 }
 
+/// このやり取り限りの指示を添えて応答を求める電文。
+///
+/// セッションの指示文は変えずに、起動時のあいさつのように
+/// 一度だけ違う振る舞いをさせたいときに使う。
+pub fn build_response_create_with_instructions(instructions: &str) -> String {
+    json!({
+        "type": "response.create",
+        "response": { "instructions": instructions },
+    })
+    .to_string()
+}
+
 /// 生成中の応答を打ち切る電文。
 pub fn build_response_cancel() -> String {
     json!({ "type": "response.cancel" }).to_string()
@@ -283,6 +295,14 @@ mod tests {
 
         assert_eq!(value["type"], "input_audio_buffer.append");
         assert_eq!(value["audio"], BASE64.encode([0xFF, 0x00, 0x7F]));
+    }
+
+    #[test]
+    fn response_create_can_carry_one_off_instructions() {
+        let value = parsed(&build_response_create_with_instructions("あさの あいさつをして"));
+
+        assert_eq!(value["type"], "response.create");
+        assert_eq!(value["response"]["instructions"], "あさの あいさつをして");
     }
 
     #[test]

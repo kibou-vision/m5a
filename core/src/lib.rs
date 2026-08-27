@@ -5,6 +5,7 @@
 pub mod audio;
 pub mod config;
 pub mod face;
+pub mod greeting;
 pub mod guardrail;
 pub mod layout;
 pub mod logbook;

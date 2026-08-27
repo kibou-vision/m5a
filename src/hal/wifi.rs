@@ -102,9 +102,21 @@ pub fn sync_clock() -> Option<EspSntp<'static>> {
     None
 }
 
-/// いまの UNIX 時刻（秒）。取得できていなければ 0 以下になる。
+/// 日本時間との時差（秒）。設定は SD カードに置かない。
+/// この端末はいまのところ日本国内でしか使わないため。
+const JST_OFFSET_SECONDS: i64 = 9 * 3_600;
+
+/// いまの日本時間を UNIX 時刻として返す。取得できていなければ 0 以下になる。
+///
+/// SNTP は UTC を返すため、時差を足してから使う。あいさつの朝昼晩の判定や
+/// 会話ログの時刻はすべてこれを基準にする。
 pub fn now_unix() -> i64 {
     let mut now: esp_idf_svc::sys::time_t = 0;
     unsafe { esp_idf_svc::sys::time(&mut now) };
-    now as i64
+
+    let utc = now as i64;
+    if utc <= 0 {
+        return utc;
+    }
+    utc + JST_OFFSET_SECONDS
 }
