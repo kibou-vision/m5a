@@ -40,7 +40,8 @@ const IDLE_SILENCE: Duration = Duration::from_millis(40);
 const CLOCK_SETTLE: Duration = Duration::from_millis(200);
 
 /// スピーカーの音量（百分率）。既定のままだと鳴らないため必ず設定する。
-const SPEAKER_VOLUME: i32 = 80;
+/// 実機で 80% では小さかったため上げている。
+const SPEAKER_VOLUME: i32 = 95;
 /// マイクの入力利得（dB）。小さいと子どもの声を拾えない。
 const MICROPHONE_GAIN_DB: f32 = 30.0;
 
@@ -237,10 +238,10 @@ fn spawn_playback(
                         let samples = decode(&chunk, format);
                         level.store(waveform::measure_level(&samples), Ordering::Relaxed);
 
-                        if played % 10 == 1 {
+                        if played % 50 == 1 {
                             let peak =
                                 samples.iter().map(|s| s.unsigned_abs()).max().unwrap_or(0);
-                            log::info!(
+                            log::debug!(
                                 "再生 {played}個目: 届いた {} バイト → {} 標本 / 最大振幅 {peak}",
                                 chunk.len(),
                                 samples.len()
