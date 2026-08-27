@@ -491,6 +491,9 @@ impl Runtime {
         };
 
         log::info!("web検索: {query}");
+        // 検索が動かない不具合の調査用。TLS の仕事を新たに始められる
+        // 内部メモリが残っているか、その場で確かめる。
+        board::report_memory("web検索の直前");
         let request = search::build_request(&query, api_key);
         self.pending_search = Some((call_id.to_string(), hal::search::spawn(request)));
     }
