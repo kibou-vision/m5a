@@ -29,6 +29,10 @@ use hal::wifi;
 const FRAME_INTERVAL_MS: u32 = 40;
 /// ひとつのきっかけから連鎖する処理の上限。取り違えで回り続けるのを防ぐ。
 const MAX_FOLLOW_UPS: usize = 8;
+/// ためておける会話ログの数。これを超えたら古いものから捨てる。
+/// 対話を続けることを優先し、記録のために memory を食いつぶさない。
+const MAX_PENDING_LOGS: usize = 64;
+
 /// SD カードへ書く前に必要な DMA の空き。
 ///
 /// SPI は書き込みのたびに DMA バッファを確保する。足りないまま呼ぶと
@@ -94,6 +98,9 @@ struct Runtime {
     /// 組み立て途中のアシスタントの発話。
     /// 文字起こしは細切れに届くため、言い終えてからまとめて記録する。
     spoken: String,
+    /// 書き出しを待っている会話ログ。
+    /// 会話中は SD の DMA バッファを確保できないため、待機に戻ってから書く。
+    pending_logs: Vec<LogEntry>,
     storage: SdStorage,
 }
 
@@ -113,6 +120,7 @@ impl Runtime {
             setup: None,
             audio: None,
             spoken: String::new(),
+            pending_logs: Vec::new(),
             storage: SdStorage::new(),
         }
     }
@@ -364,20 +372,35 @@ impl Runtime {
         self.record(Speaker::System, reply);
     }
 
-    /// 会話ログに1行残す。失敗しても対話は止めない。
-    ///
-    /// 対話そのものより優先度が低いので、メモリが足りないときは書かずに諦める。
+    /// 会話ログを1行ためる。実際に書くのは待機に戻ってから。
     fn record(&mut self, speaker: Speaker, text: impl AsRef<str>) {
-        let headroom = board::dma_headroom();
-        if headroom < SD_WRITE_HEADROOM {
-            log::warn!("メモリが足りないためログを省きました（DMA の空き {headroom} バイト）");
+        if self.pending_logs.len() >= MAX_PENDING_LOGS {
+            self.pending_logs.remove(0);
+        }
+
+        self.pending_logs
+            .push(LogEntry::new(wifi::now_unix(), speaker, text.as_ref()));
+    }
+
+    /// たまった会話ログを SD カードへ書き出す。
+    ///
+    /// 会話中は音声と通信が内部メモリを使い切っており、SPI が書き込み用の
+    /// DMA バッファを確保できない。待機に戻って空きが戻ってから書く。
+    fn flush_logs(&mut self) {
+        if self.pending_logs.is_empty() {
             return;
         }
 
-        let entry = LogEntry::new(wifi::now_unix(), speaker, text.as_ref());
+        let headroom = board::dma_headroom();
+        if headroom < SD_WRITE_HEADROOM {
+            return;
+        }
 
-        if let Err(error) = logbook::append_entry(&mut self.storage, &entry) {
-            log::debug!("ログを残せません: {error}");
+        for entry in std::mem::take(&mut self.pending_logs) {
+            if let Err(error) = logbook::append_entry(&mut self.storage, &entry) {
+                log::warn!("ログを残せません: {error}");
+                return;
+            }
         }
     }
 }
@@ -417,6 +440,11 @@ fn run(modem: Modem<'static>, settings: Result<Config, ConfigError>) -> Result<(
 
         while let Some(event) = runtime.receive() {
             advance(&mut state, &mut runtime, event);
+        }
+
+        // 待機に戻ったときだけ、たまったログを書き出す余裕がある。
+        if state == AppState::Ready {
+            runtime.flush_logs();
         }
 
         retry_at = schedule_retry(&state, retry_at, now_ms);
