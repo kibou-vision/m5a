@@ -38,14 +38,22 @@ const BROW_HALF_WIDTH: i16 = 32;
 /// おはなしボタン。仕様どおり画面の右下に置く。
 pub const TALK_BUTTON_CENTER: Point = Point::new(272, 192);
 pub const TALK_BUTTON_RADIUS: i16 = 40;
-/// 5歳児は正確に狙えないので、見た目の円より少し広く反応させる。
-const TALK_BUTTON_TOUCH_MARGIN: i16 = 10;
-/// 中央のしるしの大きさ。字が読めなくてもマイクだと分かるようにする。
-const TALK_BUTTON_MARK_DIAMETER: u16 = 40;
+
+/// マイクの絵の各部。円の中に収まる大きさにする。
+const MIC_HEAD_WIDTH: u16 = 20;
+const MIC_HEAD_HEIGHT: u16 = 30;
+/// 頭の中心をボタンの中心より上に置き、支柱と台座の場所を空ける。
+const MIC_HEAD_LIFT: i16 = 8;
+const MIC_STEM_WIDTH: u16 = 4;
+const MIC_STEM_HEIGHT: u16 = 10;
+const MIC_BASE_WIDTH: u16 = 28;
+const MIC_BASE_HEIGHT: u16 = 4;
+
+/// 読み込み中に出す印の大きさ。
+const SPINNER_DIAMETER: u16 = 72;
 
 const CALM_BACKGROUND: Color = Color::new(16, 26, 46);
 const TROUBLE_BACKGROUND: Color = Color::new(96, 28, 24);
-const SLEEPING_BACKGROUND: Color = Color::new(8, 12, 24);
 
 const EYE_COLOR: Color = Color::new(245, 250, 255);
 const PUPIL_COLOR: Color = Color::new(18, 24, 40);
@@ -56,6 +64,7 @@ const BUTTON_IDLE_COLOR: Color = Color::new(40, 170, 90);
 const BUTTON_ACTIVE_COLOR: Color = Color::new(235, 130, 40);
 const BUTTON_DISABLED_COLOR: Color = Color::new(70, 80, 80);
 const BUTTON_MARK_COLOR: Color = Color::new(250, 250, 250);
+const SPINNER_COLOR: Color = Color::new(120, 190, 255);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Point {
@@ -130,6 +139,14 @@ impl Mouth {
     }
 }
 
+/// マイクの絵。角を丸めた頭・支柱・台座で組む。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Microphone {
+    pub head: Rect,
+    pub stem: Rect,
+    pub base: Rect,
+}
+
 /// 片方の眉。外側から内側へ引く線。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Brow {
@@ -141,6 +158,8 @@ pub struct Brow {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FaceLayout {
     pub background: Color,
+    /// 立ち上げ中はここに読み込みの印を出し、顔とボタンは見せない。
+    pub spinner: Option<Rect>,
     pub left_eye: Rect,
     pub right_eye: Rect,
     /// 目が細いときは描かない。
@@ -150,8 +169,16 @@ pub struct FaceLayout {
     /// 困り顔のときだけ眉を出す。
     pub brows: Option<(Brow, Brow)>,
     pub button: Rect,
-    pub button_mark: Rect,
+    /// ボタンの中に描くマイクの絵。
+    pub microphone: Microphone,
     pub button_color: Color,
+}
+
+impl FaceLayout {
+    /// 顔ではなく読み込みの印を見せる場面か。
+    pub fn is_loading(&self) -> bool {
+        self.spinner.is_some()
+    }
 }
 
 /// 顔ひとコマ分の配置を決める。
@@ -162,6 +189,13 @@ pub fn lay_out_face(frame: &FaceFrame) -> FaceLayout {
 
     FaceLayout {
         background: background_of(frame.expression),
+        spinner: frame.expression.is_loading().then(|| {
+            Rect::around(
+                Point::new(SCREEN_WIDTH / 2, SCREEN_HEIGHT / 2),
+                SPINNER_DIAMETER,
+                SPINNER_DIAMETER,
+            )
+        }),
         left_eye: Rect::around(LEFT_EYE_CENTER, EYE_WIDTH, eye_height),
         right_eye: Rect::around(RIGHT_EYE_CENTER, EYE_WIDTH, eye_height),
         left_pupil: lay_out_pupil(LEFT_EYE_CENTER, gaze, shows_pupil),
@@ -173,22 +207,42 @@ pub fn lay_out_face(frame: &FaceFrame) -> FaceLayout {
             TALK_BUTTON_RADIUS as u16 * 2,
             TALK_BUTTON_RADIUS as u16 * 2,
         ),
-        button_mark: Rect::around(
-            TALK_BUTTON_CENTER,
-            TALK_BUTTON_MARK_DIAMETER,
-            TALK_BUTTON_MARK_DIAMETER,
-        ),
+        microphone: lay_out_microphone(),
         button_color: button_color_of(frame.expression),
     }
 }
 
-/// 指の位置がおはなしボタンの上かどうか。
-pub fn contains_talk_button(at: Point) -> bool {
-    let reach = TALK_BUTTON_RADIUS + TALK_BUTTON_TOUCH_MARGIN;
-    let dx = i32::from(at.x - TALK_BUTTON_CENTER.x);
-    let dy = i32::from(at.y - TALK_BUTTON_CENTER.y);
+/// その位置へのふれ方が、おはなしの合図になるか。
+///
+/// 5歳児は小さな的を正確に狙えないため、画面のどこでも受け付ける。
+/// 右下のマイクの絵は「ここを押すと話せる」と伝えるための目印で、
+/// 押せる場所を限る枠ではない。
+pub fn is_talk_target(at: Point) -> bool {
+    (0..SCREEN_WIDTH).contains(&at.x) && (0..SCREEN_HEIGHT).contains(&at.y)
+}
 
-    dx * dx + dy * dy <= i32::from(reach) * i32::from(reach)
+/// マイクの絵の置き場所。ボタンの中心を基準に組む。
+fn lay_out_microphone() -> Microphone {
+    let head_center = Point::new(TALK_BUTTON_CENTER.x, TALK_BUTTON_CENTER.y - MIC_HEAD_LIFT);
+    let stem_center = Point::new(
+        TALK_BUTTON_CENTER.x,
+        head_center.y + MIC_HEAD_HEIGHT as i16 / 2 + MIC_STEM_HEIGHT as i16 / 2,
+    );
+    let base_center = Point::new(
+        TALK_BUTTON_CENTER.x,
+        stem_center.y + MIC_STEM_HEIGHT as i16 / 2 + MIC_BASE_HEIGHT as i16 / 2,
+    );
+
+    Microphone {
+        head: Rect::around(head_center, MIC_HEAD_WIDTH, MIC_HEAD_HEIGHT),
+        stem: Rect::around(stem_center, MIC_STEM_WIDTH, MIC_STEM_HEIGHT),
+        base: Rect::around(base_center, MIC_BASE_WIDTH, MIC_BASE_HEIGHT),
+    }
+}
+
+/// 読み込みの印の色。
+pub fn spinner_color() -> Color {
+    SPINNER_COLOR
 }
 
 /// 目の色。
@@ -218,7 +272,6 @@ pub fn button_mark_color() -> Color {
 
 fn background_of(expression: Expression) -> Color {
     match expression {
-        Expression::Sleeping => SLEEPING_BACKGROUND,
         Expression::Trouble => TROUBLE_BACKGROUND,
         _ => CALM_BACKGROUND,
     }
@@ -228,7 +281,7 @@ fn button_color_of(expression: Expression) -> Color {
     match expression {
         Expression::Listening => BUTTON_ACTIVE_COLOR,
         // 設定待ちや接続前は押しても始まらないので沈んだ色にする。
-        Expression::Sleeping | Expression::Waiting | Expression::Trouble => BUTTON_DISABLED_COLOR,
+        Expression::Waiting | Expression::Trouble => BUTTON_DISABLED_COLOR,
         _ => BUTTON_IDLE_COLOR,
     }
 }
@@ -408,7 +461,6 @@ mod tests {
     #[test]
     fn brows_appear_only_when_troubled() {
         for expression in [
-            Expression::Sleeping,
             Expression::Waiting,
             Expression::Idle,
             Expression::Listening,
@@ -431,13 +483,75 @@ mod tests {
     }
 
     #[test]
-    fn talk_button_accepts_touches_on_and_near_it() {
-        assert!(contains_talk_button(TALK_BUTTON_CENTER));
-        assert!(contains_talk_button(Point::new(
-            TALK_BUTTON_CENTER.x + TALK_BUTTON_RADIUS,
-            TALK_BUTTON_CENTER.y
-        )));
-        assert!(!contains_talk_button(Point::new(20, 20)));
+    fn any_touch_on_the_screen_starts_talking() {
+        // 5歳児が的を狙えなくてよいよう、画面のどこでも受け付ける。
+        for at in [
+            TALK_BUTTON_CENTER,
+            Point::new(0, 0),
+            Point::new(20, 20),
+            Point::new(SCREEN_WIDTH - 1, SCREEN_HEIGHT - 1),
+        ] {
+            assert!(is_talk_target(at), "{at:?}");
+        }
+    }
+
+    #[test]
+    fn touches_outside_the_screen_are_ignored() {
+        assert!(!is_talk_target(Point::new(-1, 100)));
+        assert!(!is_talk_target(Point::new(SCREEN_WIDTH, 100)));
+        assert!(!is_talk_target(Point::new(100, SCREEN_HEIGHT)));
+    }
+
+    #[test]
+    fn microphone_sits_inside_the_button() {
+        let layout = lay_out_face(&frame(Expression::Idle, 100));
+        let button = layout.button;
+        let mic = layout.microphone;
+
+        for part in [mic.head, mic.stem, mic.base] {
+            assert!(
+                part.x >= button.x
+                    && part.y >= button.y
+                    && part.right() <= button.right()
+                    && part.bottom() <= button.bottom(),
+                "{part:?} がボタン {button:?} からはみ出した"
+            );
+        }
+    }
+
+    #[test]
+    fn microphone_stacks_head_stem_base_downwards() {
+        let mic = lay_out_face(&frame(Expression::Idle, 100)).microphone;
+
+        assert!(mic.head.bottom() <= mic.stem.y, "頭の下に支柱が来るはず");
+        assert!(mic.stem.bottom() <= mic.base.y, "支柱の下に台座が来るはず");
+        assert!(mic.base.width > mic.stem.width, "台座は支柱より広いはず");
+    }
+
+    #[test]
+    fn loading_shows_a_spinner_instead_of_the_face() {
+        let loading = lay_out_face(&frame(Expression::Waiting, 70));
+
+        assert!(loading.is_loading());
+        let spinner = loading.spinner.expect("読み込み中は印を出す");
+        // 画面の中央に置く。
+        assert_eq!(spinner.x + spinner.width as i16 / 2, SCREEN_WIDTH / 2);
+        assert_eq!(spinner.y + spinner.height as i16 / 2, SCREEN_HEIGHT / 2);
+    }
+
+    #[test]
+    fn settled_states_show_the_face_not_a_spinner() {
+        for expression in [
+            Expression::Idle,
+            Expression::Listening,
+            Expression::Thinking,
+            Expression::Talking,
+            Expression::Trouble,
+        ] {
+            let layout = lay_out_face(&frame(expression, 100));
+            assert!(!layout.is_loading(), "{expression:?}");
+            assert!(layout.spinner.is_none());
+        }
     }
 
     #[test]
@@ -450,7 +564,7 @@ mod tests {
             lay_out_face(&frame(Expression::Idle, 100)).button_color,
             BUTTON_IDLE_COLOR
         );
-        for expression in [Expression::Sleeping, Expression::Waiting, Expression::Trouble] {
+        for expression in [Expression::Waiting, Expression::Trouble] {
             assert_eq!(
                 lay_out_face(&frame(expression, 60)).button_color,
                 BUTTON_DISABLED_COLOR,
@@ -474,7 +588,6 @@ mod tests {
     #[test]
     fn everything_stays_inside_the_screen() {
         for expression in [
-            Expression::Sleeping,
             Expression::Waiting,
             Expression::Idle,
             Expression::Listening,
@@ -493,8 +606,10 @@ mod tests {
                 layout.right_eye,
                 layout.mouth.bounds(),
                 layout.button,
-                layout.button_mark,
+                layout.microphone.head,
+                layout.microphone.base,
             ];
+            boxes.extend(layout.spinner);
             boxes.extend(layout.left_pupil);
             boxes.extend(layout.right_pupil);
 

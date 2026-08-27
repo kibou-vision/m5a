@@ -12,14 +12,18 @@ const BLINK_DURATION_MS: u64 = 140;
 const BLINK_MIN_INTERVAL_MS: u64 = 2_500;
 /// まばたき間隔の振れ幅。一定間隔だと機械的に見えるため散らす。
 const BLINK_INTERVAL_SPREAD_MS: u64 = 2_500;
+/// 失敗が続いても「読み込み中」として見せる回数。
+///
+/// Wi-Fi は最初の数回つながらないことが普通にあり、そのたびに困り顔を
+/// 見せると子どもを不安にさせる。何度も駄目なときだけ親に伝える。
+pub const PATIENT_ATTEMPTS: u32 = 5;
+
 /// 考えているときに視線が左右に往復する周期。
 const GAZE_SWAY_PERIOD_MS: f32 = 1_800.0;
 
 /// 顔の基本の表情。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Expression {
-    /// 眠っている。起動直後。
-    Sleeping,
     /// 準備中。接続待ち。
     Waiting,
     /// 待機中。ふつうの笑顔。
@@ -36,22 +40,30 @@ pub enum Expression {
 
 impl Expression {
     /// アプリの状態に対応する表情。
-    pub fn from_state(state: &AppState) -> Self {
+    ///
+    /// 立ち上げ中の失敗は `failed_attempts` が少ないうちは待ち扱いにする。
+    /// 設定不備は親が直すまで直らないので、最初から困り顔で伝える。
+    pub fn from_state(state: &AppState, failed_attempts: u32) -> Self {
         match state {
-            AppState::Booting => Self::Sleeping,
-            AppState::Connecting | AppState::Opening => Self::Waiting,
+            AppState::Booting | AppState::Connecting | AppState::Opening => Self::Waiting,
             AppState::Ready => Self::Idle,
             AppState::Listening => Self::Listening,
             AppState::Thinking => Self::Thinking,
             AppState::Speaking => Self::Talking,
-            AppState::SetupRequired | AppState::Recovering(_) => Self::Trouble,
+            AppState::SetupRequired => Self::Trouble,
+            AppState::Recovering(_) if failed_attempts < PATIENT_ATTEMPTS => Self::Waiting,
+            AppState::Recovering(_) => Self::Trouble,
         }
+    }
+
+    /// 立ち上げ中で、顔ではなく読み込みの印を見せる場面か。
+    pub fn is_loading(self) -> bool {
+        self == Self::Waiting
     }
 
     /// まばたきしていないときの目の開き具合。
     fn resting_eye_openness(self) -> u8 {
         match self {
-            Self::Sleeping => 0,
             Self::Waiting => 70,
             Self::Idle => 90,
             Self::Listening => 100,
@@ -64,16 +76,11 @@ impl Expression {
     /// 声を出していないときの口の開き具合。
     fn resting_mouth_openness(self) -> u8 {
         match self {
-            Self::Sleeping => 0,
             Self::Talking => 10,
             _ => 5,
         }
     }
 
-    /// 眠っている顔はまばたきしない。
-    fn blinks(self) -> bool {
-        !matches!(self, Self::Sleeping)
-    }
 }
 
 /// ある瞬間の顔のかたち。描画側はこれだけを見て絵を組み立てる。
@@ -109,7 +116,8 @@ impl Default for FaceAnimator {
 impl FaceAnimator {
     pub fn new() -> Self {
         Self {
-            expression: Expression::Sleeping,
+            // 最初の一コマは状態が決まる前なので、読み込み中として始める。
+            expression: Expression::Waiting,
             voice_level: 0,
             next_blink_at_ms: BLINK_MIN_INTERVAL_MS,
             blink_started_at_ms: None,
@@ -139,11 +147,6 @@ impl FaceAnimator {
     }
 
     fn advance_blink(&mut self, now_ms: u64) {
-        if !self.expression.blinks() {
-            self.blink_started_at_ms = None;
-            return;
-        }
-
         match self.blink_started_at_ms {
             Some(started) if now_ms >= started + BLINK_DURATION_MS => {
                 self.blink_started_at_ms = None;
@@ -205,7 +208,7 @@ mod tests {
     #[test]
     fn maps_every_state_to_an_expression() {
         let pairs = [
-            (AppState::Booting, Expression::Sleeping),
+            (AppState::Booting, Expression::Waiting),
             (AppState::Connecting, Expression::Waiting),
             (AppState::Opening, Expression::Waiting),
             (AppState::Ready, Expression::Idle),
@@ -213,12 +216,51 @@ mod tests {
             (AppState::Thinking, Expression::Thinking),
             (AppState::Speaking, Expression::Talking),
             (AppState::SetupRequired, Expression::Trouble),
-            (AppState::Recovering(Failure::Network), Expression::Trouble),
         ];
 
         for (state, expected) in pairs {
-            assert_eq!(Expression::from_state(&state), expected, "state={state:?}");
+            assert_eq!(Expression::from_state(&state, 0), expected, "state={state:?}");
         }
+    }
+
+    #[test]
+    fn early_failures_look_like_loading() {
+        let recovering = AppState::Recovering(Failure::Network);
+
+        // 起動直後の数回は普通に失敗する。困り顔を見せない。
+        for attempts in 0..PATIENT_ATTEMPTS {
+            assert_eq!(
+                Expression::from_state(&recovering, attempts),
+                Expression::Waiting,
+                "{attempts}回目"
+            );
+        }
+    }
+
+    #[test]
+    fn persistent_failures_ask_for_help() {
+        let recovering = AppState::Recovering(Failure::Network);
+
+        assert_eq!(
+            Expression::from_state(&recovering, PATIENT_ATTEMPTS),
+            Expression::Trouble
+        );
+    }
+
+    #[test]
+    fn setup_trouble_shows_immediately() {
+        // 設定不備は待っても直らないので、最初から親に伝える。
+        assert_eq!(
+            Expression::from_state(&AppState::SetupRequired, 0),
+            Expression::Trouble
+        );
+    }
+
+    #[test]
+    fn loading_states_hide_the_face() {
+        assert!(Expression::Waiting.is_loading());
+        assert!(!Expression::Idle.is_loading());
+        assert!(!Expression::Trouble.is_loading());
     }
 
     #[test]
@@ -260,15 +302,6 @@ mod tests {
             (12..=24).contains(&blink_count),
             "60秒で12〜24回まばたきするはず: {blink_count}回"
         );
-    }
-
-    #[test]
-    fn sleeping_face_keeps_eyes_shut_without_blinking() {
-        let mut animator = FaceAnimator::new();
-
-        for now_ms in (0..10_000).step_by(50) {
-            assert_eq!(animator.frame_at(now_ms).eye_openness, 0);
-        }
     }
 
     #[test]

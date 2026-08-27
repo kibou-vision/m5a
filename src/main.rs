@@ -422,6 +422,9 @@ fn run(modem: Modem<'static>, settings: Result<Config, ConfigError>) -> Result<(
     let mut animator = FaceAnimator::new();
     let mut touch = TouchReader::new(board::touch_device());
     let mut retry_at: Option<u64> = None;
+    // 立ち上げ中の失敗を数える。数回は読み込み中として見せ、
+    // それでも駄目なときだけ困り顔で親に伝える。
+    let mut failed_attempts = 0_u32;
 
     runtime.open_audio();
     advance(&mut state, &mut runtime, startup);
@@ -450,11 +453,15 @@ fn run(modem: Modem<'static>, settings: Result<Config, ConfigError>) -> Result<(
         retry_at = schedule_retry(&state, retry_at, now_ms);
         if retry_at.is_some_and(|due| now_ms >= due) {
             retry_at = None;
-            log::info!("やりなおします");
+            failed_attempts += 1;
+            log::info!("やりなおします（{failed_attempts}回目）");
             advance(&mut state, &mut runtime, AppEvent::RetryRequested);
         }
+        if state == AppState::Ready {
+            failed_attempts = 0;
+        }
 
-        animator.set_expression(Expression::from_state(&state));
+        animator.set_expression(Expression::from_state(&state, failed_attempts));
         animator.set_voice_level(runtime.voice_level());
         let frame = animator.frame_at(now_ms);
         let placement = layout::lay_out_face(&frame);
@@ -489,7 +496,7 @@ fn to_event(change: TouchChange) -> Option<AppEvent> {
         TouchChange::Pressed(at) => {
             // ボタンを狙えているかは実機でしか分からないため、座標を残す。
             log::info!("さわった: ({}, {})", at.x, at.y);
-            layout::contains_talk_button(at).then_some(AppEvent::TalkPressed)
+            layout::is_talk_target(at).then_some(AppEvent::TalkPressed)
         }
         TouchChange::Released => Some(AppEvent::TalkReleased),
     }
