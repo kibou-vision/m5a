@@ -40,8 +40,16 @@ const IDLE_SILENCE: Duration = Duration::from_millis(40);
 const CLOCK_SETTLE: Duration = Duration::from_millis(200);
 
 /// スピーカーの音量（百分率）。既定のままだと鳴らないため必ず設定する。
-/// 実機で 80% では小さかったため上げている。
-const SPEAKER_VOLUME: i32 = 95;
+const SPEAKER_VOLUME: i32 = 80;
+
+/// AW88298 の音量レジスタ。上位バイトが減衰量で、0 が最大、0.5dB 刻み。
+const VOLUME_REGISTER: i32 = 0x0C;
+/// 音量レジスタの下位バイト。コーデックの既定値に合わせる。
+const VOLUME_FLAGS: i32 = 0x64;
+/// BSP がアンプ利得として決め打ちしている値（dB）。
+const BSP_PA_GAIN_DB: i32 = 15;
+/// 減衰量レジスタは 0.5dB ごとに 1 進む。
+const STEPS_PER_DB: i32 = 2;
 /// マイクの入力利得（dB）。小さいと子どもの声を拾えない。
 const MICROPHONE_GAIN_DB: f32 = 30.0;
 
@@ -93,6 +101,7 @@ impl Audio {
             "スピーカーを開けません",
         )?;
         set_volume(&speaker, SPEAKER_VOLUME);
+        restore_amplifier_gain(&speaker);
 
         let level = Arc::new(AtomicU8::new(0));
         let (to_play, playing) = sync_channel(QUEUE_DEPTH);
@@ -167,6 +176,37 @@ fn set_volume(speaker: &Codec, percent: i32) {
     } else {
         log::info!("スピーカーの音量: {percent}%");
     }
+}
+
+/// BSP が差し引いているアンプ利得を取り戻す。
+///
+/// AW88298 のドライバは要求音量から `pa_gain` を引いてからレジスタに落とす。
+/// BSP がこれを 15dB で決め打ちしており、指定した音量よりかなり小さくなる。
+/// BSP のコーデック生成には手を入れられないため、設定後にレジスタを
+/// 直接書き戻して目減りを打ち消す。
+fn restore_amplifier_gain(speaker: &Codec) {
+    let mut current = 0;
+    let read = unsafe { bsp::esp_codec_dev_read_reg(speaker.0, VOLUME_REGISTER, &mut current) };
+    if read != 0 {
+        log::warn!("音量レジスタを読めません: {read}");
+        return;
+    }
+
+    let attenuation = (current >> 8) & 0xFF;
+    let restored = (attenuation - BSP_PA_GAIN_DB * STEPS_PER_DB).max(0);
+
+    let written = unsafe {
+        bsp::esp_codec_dev_write_reg(speaker.0, VOLUME_REGISTER, restored << 8 | VOLUME_FLAGS)
+    };
+    if written != 0 {
+        log::warn!("音量レジスタを書けません: {written}");
+        return;
+    }
+
+    log::info!(
+        "アンプの利得を戻しました: 減衰 {attenuation} → {restored}（{} dB ぶん）",
+        BSP_PA_GAIN_DB
+    );
 }
 
 /// マイクの感度を決める。
