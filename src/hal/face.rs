@@ -24,6 +24,15 @@ const SPINNER_PERIOD_MS: u32 = 1_000;
 const SPINNER_ARC_DEGREES: u32 = 60;
 /// 読み込みの印の大きさ。
 const SPINNER_SIZE: i32 = 72;
+/// 笑った口と受け皿の線の太さ。
+const SMILE_THICKNESS: i32 = 6;
+const CRADLE_THICKNESS: i32 = 3;
+/// 下向きの弧を描く角度。0度が右、90度が下。
+const ARC_START_DEGREES: i32 = 0;
+const ARC_END_DEGREES: i32 = 180;
+/// 口角を上げるため、弧の両端を少し内側に寄せる。
+const SMILE_START_DEGREES: i32 = 20;
+const SMILE_END_DEGREES: i32 = 160;
 
 /// 画面に置かれた顔。
 pub struct FaceView {
@@ -37,15 +46,16 @@ pub struct FaceView {
     left_pupil: *mut bsp::lv_obj_t,
     right_pupil: *mut bsp::lv_obj_t,
     mouth: *mut bsp::lv_obj_t,
-    /// 笑った口にするため、口の上半分を背景色で隠す板。
-    mouth_cover: *mut bsp::lv_obj_t,
+    /// 笑った口。口を開けずに口角だけ上げた線として描く。
+    smile: *mut bsp::lv_obj_t,
     left_brow: *mut bsp::lv_obj_t,
     right_brow: *mut bsp::lv_obj_t,
     /// 眉の線の座標。LVGL が参照し続けるので、動かない場所に置いておく。
     brow_points: Box<[[bsp::lv_point_precise_t; 2]; 2]>,
     button: *mut bsp::lv_obj_t,
-    /// マイクの絵。頭・支柱・台座の3つで組む。
+    /// マイクの絵。頭・受け皿・支柱・台座で組む。
     mic_head: *mut bsp::lv_obj_t,
+    mic_cradle: *mut bsp::lv_obj_t,
     mic_stem: *mut bsp::lv_obj_t,
     mic_base: *mut bsp::lv_obj_t,
     /// 立ち上げ中に出す読み込みの印。
@@ -65,11 +75,12 @@ impl FaceView {
             let left_pupil = make_panel(face);
             let right_pupil = make_panel(face);
             let mouth = make_panel(face);
-            let mouth_cover = make_panel(face);
+            let smile = make_arc(face, layout::mouth_color(), SMILE_THICKNESS);
             let left_brow = make_line(face);
             let right_brow = make_line(face);
             let button = make_panel(face);
             let mic_head = make_panel(face);
+            let mic_cradle = make_arc(face, layout::button_mark_color(), CRADLE_THICKNESS);
             let mic_stem = make_panel(face);
             let mic_base = make_panel(face);
             let spinner = make_spinner(screen);
@@ -99,12 +110,13 @@ impl FaceView {
                 left_pupil,
                 right_pupil,
                 mouth,
-                mouth_cover,
+                smile,
                 left_brow,
                 right_brow,
                 brow_points: Box::new([[bsp::lv_point_precise_t { x: 0, y: 0 }; 2]; 2]),
                 button,
                 mic_head,
+                mic_cradle,
                 mic_stem,
                 mic_base,
                 spinner,
@@ -157,38 +169,35 @@ impl FaceView {
     /// マイクの絵を置く。押せる場所は画面全体だが、ここを目印にしてもらう。
     unsafe fn write_microphone(&mut self, microphone: Microphone) {
         place(self.mic_head, microphone.head);
+        place(self.mic_cradle, microphone.cradle);
+        bsp::lv_arc_set_bg_angles(self.mic_cradle, ARC_START_DEGREES, ARC_END_DEGREES);
         place(self.mic_stem, microphone.stem);
         place(self.mic_base, microphone.base);
     }
 
     unsafe fn write_mouth(&mut self, layout: &FaceLayout) {
         let bounds = layout.mouth.bounds();
-        place(self.mouth, bounds);
 
         match layout.mouth {
             // 閉じた口は角を丸めた細い棒にする。
             Mouth::Closed(_) => {
+                place(self.mouth, bounds);
                 bsp::lv_obj_set_style_radius(self.mouth, bounds.height as i32 / 2, MAIN_PART);
-                hide(self.mouth_cover);
+                show(self.mouth);
+                hide(self.smile);
             }
             Mouth::Open(_) => {
+                place(self.mouth, bounds);
                 round(self.mouth);
-                hide(self.mouth_cover);
+                show(self.mouth);
+                hide(self.smile);
             }
-            // 楕円の上半分を背景色で隠して弧に見せる。
+            // 口は開けず、口角の上がった線だけを描く。
             Mouth::Smile(_) => {
-                round(self.mouth);
-                place(
-                    self.mouth_cover,
-                    Rect {
-                        x: bounds.x,
-                        y: bounds.y,
-                        width: bounds.width,
-                        height: bounds.height / 2,
-                    },
-                );
-                paint(self.mouth_cover, layout.background);
-                show(self.mouth_cover);
+                place(self.smile, bounds);
+                bsp::lv_arc_set_bg_angles(self.smile, SMILE_START_DEGREES, SMILE_END_DEGREES);
+                show(self.smile);
+                hide(self.mouth);
             }
         }
     }
@@ -208,6 +217,29 @@ impl FaceView {
         show(self.left_brow);
         show(self.right_brow);
     }
+}
+
+/// 線だけの弧を作る。塗りもつまみも持たせない。
+unsafe fn make_arc(
+    parent: *mut bsp::lv_obj_t,
+    color: layout::Color,
+    thickness: i32,
+) -> *mut bsp::lv_obj_t {
+    let arc = bsp::lv_arc_create(parent);
+
+    bsp::lv_obj_remove_style_all(arc);
+    bsp::lv_obj_set_style_arc_color(arc, color_of(color), MAIN_PART);
+    bsp::lv_obj_set_style_arc_width(arc, thickness, MAIN_PART);
+    bsp::lv_obj_set_style_arc_rounded(arc, true, MAIN_PART);
+    // 進み具合を示す部分とつまみは使わない。
+    bsp::lv_obj_set_style_arc_opa(arc, 0, INDICATOR_PART);
+    bsp::lv_obj_set_style_bg_opa(arc, 0, KNOB_PART);
+    bsp::lv_obj_remove_flag(
+        arc,
+        bsp::lv_obj_flag_t_LV_OBJ_FLAG_SCROLLABLE | bsp::lv_obj_flag_t_LV_OBJ_FLAG_CLICKABLE,
+    );
+
+    arc
 }
 
 /// 顔の部品をまとめる、透明で画面いっぱいの入れ物を作る。

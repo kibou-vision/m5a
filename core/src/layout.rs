@@ -10,8 +10,8 @@ pub const SCREEN_WIDTH: i16 = 320;
 pub const SCREEN_HEIGHT: i16 = 240;
 
 /// 目の中心。
-const LEFT_EYE_CENTER: Point = Point::new(92, 96);
-const RIGHT_EYE_CENTER: Point = Point::new(228, 96);
+const LEFT_EYE_CENTER: Point = Point::new(80, 96);
+const RIGHT_EYE_CENTER: Point = Point::new(240, 96);
 const EYE_WIDTH: u16 = 72;
 const EYE_HEIGHT: u16 = 72;
 /// 閉じきっても線として見えるようにする下限。
@@ -28,6 +28,9 @@ const MOUTH_WIDTH: u16 = 96;
 const MOUTH_MAX_HEIGHT: u16 = 56;
 const MOUTH_MIN_HEIGHT: u16 = 10;
 const CLOSED_MOUTH_HEIGHT: u16 = 6;
+/// 笑った口の大きさ。線として描くので高さは弧の深さになる。
+const SMILE_WIDTH: u16 = 84;
+const SMILE_HEIGHT: u16 = 40;
 
 /// 眉が目の上に浮く高さ。
 const BROW_LIFT: i16 = 52;
@@ -37,17 +40,20 @@ const BROW_HALF_WIDTH: i16 = 32;
 
 /// おはなしボタン。仕様どおり画面の右下に置く。
 pub const TALK_BUTTON_CENTER: Point = Point::new(272, 192);
-pub const TALK_BUTTON_RADIUS: i16 = 40;
+pub const TALK_BUTTON_RADIUS: i16 = 32;
 
 /// マイクの絵の各部。円の中に収まる大きさにする。
-const MIC_HEAD_WIDTH: u16 = 20;
-const MIC_HEAD_HEIGHT: u16 = 30;
-/// 頭の中心をボタンの中心より上に置き、支柱と台座の場所を空ける。
-const MIC_HEAD_LIFT: i16 = 8;
-const MIC_STEM_WIDTH: u16 = 4;
-const MIC_STEM_HEIGHT: u16 = 10;
-const MIC_BASE_WIDTH: u16 = 28;
-const MIC_BASE_HEIGHT: u16 = 4;
+const MIC_HEAD_WIDTH: u16 = 16;
+const MIC_HEAD_HEIGHT: u16 = 24;
+/// 頭の中心をボタンの中心より上に置き、受け皿と支柱の場所を空ける。
+const MIC_HEAD_LIFT: i16 = 12;
+/// 受け皿。頭の下half を包む下向きの弧として描く。
+const MIC_CRADLE_SIZE: u16 = 30;
+const MIC_CRADLE_LIFT: i16 = 6;
+const MIC_STEM_WIDTH: u16 = 3;
+const MIC_STEM_HEIGHT: u16 = 7;
+const MIC_BASE_WIDTH: u16 = 22;
+const MIC_BASE_HEIGHT: u16 = 3;
 
 /// 読み込み中に出す印の大きさ。
 const SPINNER_DIAMETER: u16 = 72;
@@ -128,7 +134,7 @@ pub enum Mouth {
     Closed(Rect),
     /// 開いた口。声の大きさで縦に伸びる楕円。
     Open(Rect),
-    /// 笑った口。下向きの弧。
+    /// 笑った口。口は閉じたまま、口角の上がった線で描く。
     Smile(Rect),
 }
 
@@ -140,10 +146,13 @@ impl Mouth {
     }
 }
 
-/// マイクの絵。角を丸めた頭・支柱・台座で組む。
+/// マイクの絵。頭・受け皿・支柱・台座で組む。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Microphone {
+    /// 角を丸めた縦長の頭。
     pub head: Rect,
+    /// 頭を下から包む受け皿。下向きの弧として描く。
+    pub cradle: Rect,
     pub stem: Rect,
     pub base: Rect,
 }
@@ -222,22 +231,34 @@ pub fn is_talk_target(at: Point) -> bool {
     (0..SCREEN_WIDTH).contains(&at.x) && (0..SCREEN_HEIGHT).contains(&at.y)
 }
 
-/// マイクの絵の置き場所。ボタンの中心を基準に組む。
+/// マイクの絵の置き場所。ボタンの中心を基準に、上から順に積む。
 fn lay_out_microphone() -> Microphone {
     let head_center = Point::new(TALK_BUTTON_CENTER.x, TALK_BUTTON_CENTER.y - MIC_HEAD_LIFT);
-    let stem_center = Point::new(
-        TALK_BUTTON_CENTER.x,
-        head_center.y + MIC_HEAD_HEIGHT as i16 / 2 + MIC_STEM_HEIGHT as i16 / 2,
+    let cradle = Rect::around(
+        Point::new(TALK_BUTTON_CENTER.x, TALK_BUTTON_CENTER.y - MIC_CRADLE_LIFT),
+        MIC_CRADLE_SIZE,
+        MIC_CRADLE_SIZE,
     );
-    let base_center = Point::new(
-        TALK_BUTTON_CENTER.x,
-        stem_center.y + MIC_STEM_HEIGHT as i16 / 2 + MIC_BASE_HEIGHT as i16 / 2,
-    );
+
+    // 前の部品の下端から積む。中心からの計算を重ねると丸めでずれる。
+    let stem = Rect {
+        x: TALK_BUTTON_CENTER.x - MIC_STEM_WIDTH as i16 / 2,
+        y: cradle.bottom(),
+        width: MIC_STEM_WIDTH,
+        height: MIC_STEM_HEIGHT,
+    };
+    let base = Rect {
+        x: TALK_BUTTON_CENTER.x - MIC_BASE_WIDTH as i16 / 2,
+        y: stem.bottom(),
+        width: MIC_BASE_WIDTH,
+        height: MIC_BASE_HEIGHT,
+    };
 
     Microphone {
         head: Rect::around(head_center, MIC_HEAD_WIDTH, MIC_HEAD_HEIGHT),
-        stem: Rect::around(stem_center, MIC_STEM_WIDTH, MIC_STEM_HEIGHT),
-        base: Rect::around(base_center, MIC_BASE_WIDTH, MIC_BASE_HEIGHT),
+        cradle,
+        stem,
+        base,
     }
 }
 
@@ -303,8 +324,9 @@ fn lay_out_mouth(frame: &FaceFrame) -> Mouth {
                 .max(MOUTH_MIN_HEIGHT);
             Mouth::Open(Rect::around(MOUTH_CENTER, MOUTH_WIDTH, height))
         }
+        // 口は開けず、口角を上げた線にする。
         Expression::Idle | Expression::Listening => {
-            Mouth::Smile(Rect::around(MOUTH_CENTER, MOUTH_WIDTH, MOUTH_MAX_HEIGHT))
+            Mouth::Smile(Rect::around(MOUTH_CENTER, SMILE_WIDTH, SMILE_HEIGHT))
         }
         _ => Mouth::Closed(Rect::around(
             MOUTH_CENTER,
@@ -509,7 +531,7 @@ mod tests {
         let button = layout.button;
         let mic = layout.microphone;
 
-        for part in [mic.head, mic.stem, mic.base] {
+        for part in [mic.head, mic.cradle, mic.stem, mic.base] {
             assert!(
                 part.x >= button.x
                     && part.y >= button.y
@@ -521,12 +543,38 @@ mod tests {
     }
 
     #[test]
-    fn microphone_stacks_head_stem_base_downwards() {
+    fn microphone_stacks_its_parts_downwards() {
         let mic = lay_out_face(&frame(Expression::Idle, 100)).microphone;
 
-        assert!(mic.head.bottom() <= mic.stem.y, "頭の下に支柱が来るはず");
+        assert!(mic.cradle.bottom() <= mic.stem.y, "受け皿の下に支柱が来るはず");
         assert!(mic.stem.bottom() <= mic.base.y, "支柱の下に台座が来るはず");
         assert!(mic.base.width > mic.stem.width, "台座は支柱より広いはず");
+    }
+
+    #[test]
+    fn cradle_wraps_the_microphone_head() {
+        let mic = lay_out_face(&frame(Expression::Idle, 100)).microphone;
+
+        assert!(mic.cradle.width > mic.head.width, "受け皿は頭より広いはず");
+        assert!(mic.cradle.y > mic.head.y, "受け皿は頭より下から始まるはず");
+        assert!(
+            mic.cradle.bottom() > mic.head.bottom(),
+            "受け皿は頭の下端を越えて包むはず"
+        );
+    }
+
+    #[test]
+    fn smiling_keeps_the_mouth_closed() {
+        let smiling = lay_out_face(&frame(Expression::Idle, 100)).mouth;
+        let talking = lay_out_face(&FaceFrame {
+            mouth_openness: 100,
+            ..frame(Expression::Talking, 100)
+        })
+        .mouth;
+
+        // 笑顔は線で描くので、口を開けている形とは区別する。
+        assert!(matches!(smiling, Mouth::Smile(_)));
+        assert!(matches!(talking, Mouth::Open(_)));
     }
 
     #[test]
