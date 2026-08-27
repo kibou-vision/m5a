@@ -57,7 +57,7 @@ const BSP_PA_GAIN_DB: i32 = 15;
 /// 減衰量レジスタは 0.5dB ごとに 1 進む。
 const STEPS_PER_DB: i32 = 2;
 /// マイクの入力利得（dB）。小さいと子どもの声を拾えない。
-const MICROPHONE_GAIN_DB: f32 = 30.0;
+const MICROPHONE_GAIN_DB: f32 = 36.0;
 
 /// コーデックの取っ手。
 ///
