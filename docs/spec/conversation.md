@@ -45,3 +45,21 @@ GA 版で名前が変わっている点に注意する。
 
 知らない種類の出来事は無視する。`error` の多くは回復可能なので、
 受け取ってもセッションは切らずに記録に留める。
+
+## web検索（function calling）
+
+検索用の APIキーが設定されているときだけ、セッションに検索の function tool
+（`search_web`）を渡す。呼び出しは次の順で進める。
+
+1. `session.update` の `session.tools` に `search_web` を含めて渡す
+2. モデルが調べたいと判断すると、`response.done` の
+   `response.output` に `type: "function_call"` の項目が載って届く
+   （`call_id` / `name` / `arguments` を持つ）
+3. `arguments` の `query` で Tavily に問い合わせ、結果の要約を
+   `conversation.item.create`（`item.type: "function_call_output"`、
+   同じ `call_id`）で返す
+4. 続けて `response.create` を送り、応答を再開させる
+
+検索が使えない・失敗した・結果が得られなかったときも、必ず何らかの
+`function_call_output` を返す。モデルを待たせたままにせず、
+ガードレールの指示文どおり「わからない」と答えさせる。

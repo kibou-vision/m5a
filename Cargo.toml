@@ -25,6 +25,7 @@ esp-idf-svc = { git = "https://github.com/esp-rs/esp-idf-svc.git" }
 m5a-core = { path = "core" }
 log = "0.4"
 anyhow = "1"
+embedded-svc = { version = "0.29", default-features = false }
 mipidsi = "0.10"
 embedded-graphics = "0.8"
 embedded-hal = "1"

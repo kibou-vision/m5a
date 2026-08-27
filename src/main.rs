@@ -16,6 +16,7 @@ use m5a_core::layout;
 use m5a_core::logbook::{self, LogEntry, Speaker};
 use m5a_core::ports::StorageError;
 use m5a_core::realtime::{self, ServerEvent, SessionSetup};
+use m5a_core::search;
 use m5a_core::state::{transition, AppAction, AppEvent, AppState, Failure};
 
 use hal::audio::Audio;
@@ -25,6 +26,8 @@ use hal::session::Session;
 use hal::storage::SdStorage;
 use hal::touch::{TouchChange, TouchReader};
 use hal::wifi;
+
+use std::sync::mpsc::Receiver;
 
 /// 画面の明るさ。暗い部屋でもまぶしくない程度に抑える。
 const SCREEN_BRIGHTNESS: u8 = 50;
@@ -106,6 +109,8 @@ struct Runtime {
     /// 会話中は SD の DMA バッファを確保できないため、待機に戻ってから書く。
     pending_logs: Vec<LogEntry>,
     storage: SdStorage,
+    /// 進行中のweb検索。呼び出しのcall_idと、結果を待つ受け口。
+    pending_search: Option<(String, Receiver<Option<String>>)>,
 }
 
 impl Runtime {
@@ -126,6 +131,7 @@ impl Runtime {
             spoken: String::new(),
             pending_logs: Vec::new(),
             storage: SdStorage::new(),
+            pending_search: None,
         }
     }
 
@@ -143,6 +149,8 @@ impl Runtime {
                 self.silence();
                 // 途中で遮っても、そこまで言った分は残す。
                 self.flush_spoken();
+                // 検索中に遮られたら、遅れて届く結果は捨てる。
+                self.pending_search = None;
                 None
             }
             AppAction::StartCapture => {
@@ -231,11 +239,18 @@ impl Runtime {
         let config = self.config.as_ref()?;
         let guardrail = self.guardrail.as_ref()?;
 
+        let tools = if config.search.api_key().is_some() {
+            vec![search::tool_definition()]
+        } else {
+            Vec::new()
+        };
+
         let setup = SessionSetup {
             model: config.openai.model.clone(),
             voice: config.openai.voice.clone(),
             audio_format: config.openai.audio_format,
             instructions: guardrail.build_instructions(),
+            tools,
         };
 
         board::report_memory("接続の直前");
@@ -366,6 +381,10 @@ impl Runtime {
                 self.flush_spoken();
                 Some(AppEvent::ResponseFinished)
             }
+            ServerEvent::ToolCallRequested { call_id, name, arguments } => {
+                self.handle_tool_call(&call_id, &name, &arguments);
+                None
+            }
             // 多くは回復できるので、繋いだまま記録に留める。
             ServerEvent::Reported { code, message } => {
                 log::warn!("OpenAI からの知らせ: {message} ({code:?})");
@@ -391,6 +410,57 @@ impl Runtime {
             self.record(Speaker::System, format!("気になる発言がありました: {text}"));
         }
         self.record(Speaker::System, reply);
+    }
+
+    /// モデルからの function tool 呼び出しを受け、検索を始めるか、
+    /// その場で「わからない」を返す。
+    fn handle_tool_call(&mut self, call_id: &str, name: &str, arguments: &str) {
+        if name != search::TOOL_NAME {
+            self.finish_tool_call(call_id, "それは できません");
+            return;
+        }
+
+        let Some(api_key) = self.config.as_ref().and_then(|config| config.search.api_key())
+        else {
+            self.finish_tool_call(call_id, "いまは しらべられません");
+            return;
+        };
+
+        let Some(query) = search::extract_query(arguments) else {
+            self.finish_tool_call(call_id, "なにを しらべるか わかりませんでした");
+            return;
+        };
+
+        log::info!("web検索: {query}");
+        let request = search::build_request(&query, api_key);
+        self.pending_search = Some((call_id.to_string(), hal::search::spawn(request)));
+    }
+
+    /// 検索スレッドの結果が届いていれば、会話へ差し戻す。
+    ///
+    /// スレッドが答えを送らずに終わった（例えば途中で落ちた）場合も
+    /// 「わからなかった」で会話を進め、Thinking のまま止まらないようにする。
+    fn poll_search(&mut self) {
+        use std::sync::mpsc::TryRecvError;
+
+        let Some((_, receiver)) = self.pending_search.as_ref() else {
+            return;
+        };
+
+        let output = match receiver.try_recv() {
+            Ok(result) => result.unwrap_or_else(|| "わかりませんでした".to_string()),
+            Err(TryRecvError::Empty) => return,
+            Err(TryRecvError::Disconnected) => "わかりませんでした".to_string(),
+        };
+
+        let (call_id, _) = self.pending_search.take().expect("直前に確かめたはず");
+        self.finish_tool_call(&call_id, &output);
+    }
+
+    /// function tool の実行結果を送り、応答の続きを求める。
+    fn finish_tool_call(&mut self, call_id: &str, output: &str) {
+        self.tell(&realtime::build_function_call_output(call_id, output));
+        self.tell(&realtime::build_response_create());
     }
 
     /// 会話ログを1行ためる。実際に書くのは待機に戻ってから。
@@ -461,6 +531,7 @@ fn run(modem: Modem<'static>, settings: Result<Config, ConfigError>) -> Result<(
         }
 
         runtime.push_captured();
+        runtime.poll_search();
 
         while let Some(event) = runtime.receive() {
             advance(&mut state, &mut runtime, event);

@@ -67,6 +67,14 @@ voice = "marin"
 #   ulaw  = でんわ の おとしつ。つうしんりょう が すくなく、あんてい します。
 #   pcm16 = たかい おとしつ。つうしん が おもく、とぎれる ことが あります。
 audio_format = "ulaw"
+
+[search]
+# アシスタントが しらないこと を インターネットで しらべられる ように する
+# ための せってい。かかなければ、しらべる きのう は つかいません。
+#
+# Tavily (https://www.tavily.com/) で むりょう の アカウントを つくると
+# APIキー が もらえます。
+api_key = ""
 "#;
 
 /// 音声のやりとりに使う形式。
@@ -122,11 +130,30 @@ pub struct OpenAiConfig {
     pub audio_format: AudioFormat,
 }
 
+/// web検索の設定。記入は任意で、無ければ検索の機能そのものを使わない。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SearchConfig {
+    #[serde(default)]
+    pub api_key: Option<String>,
+}
+
+impl SearchConfig {
+    /// 検索を有効にするAPIキー。空欄・未記入なら `None`。
+    pub fn api_key(&self) -> Option<&str> {
+        self.api_key
+            .as_deref()
+            .map(str::trim)
+            .filter(|key| !key.is_empty())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Config {
     pub child: ChildConfig,
     pub wifi: WifiConfig,
     pub openai: OpenAiConfig,
+    #[serde(default)]
+    pub search: SearchConfig,
 }
 
 fn default_age() -> u8 {
@@ -443,6 +470,41 @@ mod tests {
             problems,
             vec![ConfigProblem::UnsupportedVoice("ドラえもん".to_string())]
         );
+    }
+
+    #[test]
+    fn search_api_key_is_absent_when_left_blank() {
+        let config = load_config(&mut MemoryStorage::with_file(CONFIG_PATH, &filled_source()))
+            .expect("記入済みなら読めるはず");
+
+        assert_eq!(config.search.api_key(), None);
+    }
+
+    #[test]
+    fn search_section_can_be_omitted_entirely() {
+        let source = filled_source().replace(
+            "[search]\n\
+             # アシスタントが しらないこと を インターネットで しらべられる ように する\n\
+             # ための せってい。かかなければ、しらべる きのう は つかいません。\n\
+             #\n\
+             # Tavily (https://www.tavily.com/) で むりょう の アカウントを つくると\n\
+             # APIキー が もらえます。\n\
+             api_key = \"\"\n",
+            "",
+        );
+
+        let config = parse_config(&source).expect("[search] を省略しても読めるはず");
+
+        assert_eq!(config.search.api_key(), None);
+    }
+
+    #[test]
+    fn search_api_key_is_read_when_filled_in() {
+        let source = filled_source().replace("api_key = \"\"\n", "api_key = \"tvly-secret\"\n");
+
+        let config = parse_config(&source).expect("記入済みなら読めるはず");
+
+        assert_eq!(config.search.api_key(), Some("tvly-secret"));
     }
 
     #[test]

@@ -42,6 +42,9 @@ sequenceDiagram
   participant Proto as core::realtime
   participant API as OpenAI Realtime API
   participant Log as core::logbook
+  participant Search as core::search
+  participant HalSearch as hal::search
+  participant Tavily as Tavily
 
   Child->>Touch: ボタンを押す
   Touch->>Main: Pressed
@@ -64,6 +67,18 @@ sequenceDiagram
   API-->>Proto: input_audio_transcription.completed
   Proto-->>Main: ChildSaid
   Main->>Log: こどもの発話を追記
+
+  opt モデルが検索を求めた場合
+    API-->>Proto: response.done（function_call）
+    Proto-->>Main: ToolCallRequested
+    Main->>Search: build_request(query)
+    Main->>HalSearch: spawn(request)
+    HalSearch->>Tavily: POST /search
+    Tavily-->>HalSearch: 要約 / 失敗
+    HalSearch-->>Main: チャンネル経由で結果
+    Main->>Proto: build_function_call_output() / build_response_create()
+    Proto->>API: function_call_output ＋ response.create
+  end
 
   API-->>Proto: response.output_audio.delta
   Proto-->>Main: AudioDelta

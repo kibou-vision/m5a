@@ -24,6 +24,8 @@ pub struct SessionSetup {
     pub voice: String,
     pub audio_format: AudioFormat,
     pub instructions: String,
+    /// モデルが呼び出せる function tool。空なら何も渡さない。
+    pub tools: Vec<Value>,
 }
 
 /// サーバから届いた出来事。
@@ -41,6 +43,12 @@ pub enum ServerEvent {
     ChildSaid(String),
     /// 応答が終わった。
     ResponseFinished,
+    /// モデルが function tool の呼び出しを求めた。
+    ToolCallRequested {
+        call_id: String,
+        name: String,
+        arguments: String,
+    },
     /// サーバがエラーを報告した。多くは回復可能なのでセッションは維持する。
     Reported { code: Option<String>, message: String },
     /// この端末では使わない出来事。
@@ -67,31 +75,40 @@ pub fn build_auth_header(api_key: &str) -> String {
 pub fn build_session_update(setup: &SessionSetup) -> String {
     let format = describe_audio_format(setup.audio_format);
 
+    let mut session = json!({
+        "type": "realtime",
+        "model": setup.model,
+        "instructions": setup.instructions,
+        "output_modalities": ["audio"],
+        "audio": {
+            "input": {
+                "format": format,
+                "transcription": {
+                    "model": TRANSCRIPTION_MODEL,
+                    "language": "ja",
+                },
+                "noise_reduction": { "type": "near_field" },
+                // 押している間だけ録音するので、サーバ側の発話区切り検出は使わない。
+                "turn_detection": Value::Null,
+            },
+            "output": {
+                "format": format,
+                "voice": setup.voice,
+            },
+        },
+        "reasoning": { "effort": REASONING_EFFORT },
+    });
+
+    // ツールを渡さない子機では tools 自体を省き、モデルに存在しない機能を
+    // 匂わせない。
+    if !setup.tools.is_empty() {
+        session["tools"] = Value::Array(setup.tools.clone());
+        session["tool_choice"] = json!("auto");
+    }
+
     json!({
         "type": "session.update",
-        "session": {
-            "type": "realtime",
-            "model": setup.model,
-            "instructions": setup.instructions,
-            "output_modalities": ["audio"],
-            "audio": {
-                "input": {
-                    "format": format,
-                    "transcription": {
-                        "model": TRANSCRIPTION_MODEL,
-                        "language": "ja",
-                    },
-                    "noise_reduction": { "type": "near_field" },
-                    // 押している間だけ録音するので、サーバ側の発話区切り検出は使わない。
-                    "turn_detection": Value::Null,
-                },
-                "output": {
-                    "format": format,
-                    "voice": setup.voice,
-                },
-            },
-            "reasoning": { "effort": REASONING_EFFORT },
-        }
+        "session": session,
     })
     .to_string()
 }
@@ -137,6 +154,19 @@ pub fn build_response_cancel() -> String {
     json!({ "type": "response.cancel" }).to_string()
 }
 
+/// function tool の実行結果をモデルへ返す電文。
+pub fn build_function_call_output(call_id: &str, output: &str) -> String {
+    json!({
+        "type": "conversation.item.create",
+        "item": {
+            "type": "function_call_output",
+            "call_id": call_id,
+            "output": output,
+        },
+    })
+    .to_string()
+}
+
 /// サーバからの電文を解釈する。知らない種類は [`ServerEvent::Ignored`] にする。
 pub fn parse_server_event(payload: &str) -> Result<ServerEvent, ProtocolError> {
     let value: Value = serde_json::from_str(payload).map_err(|error| ProtocolError {
@@ -171,7 +201,12 @@ pub fn parse_server_event(payload: &str) -> Result<ServerEvent, ProtocolError> {
             }
         }
 
-        "response.done" => ServerEvent::ResponseFinished,
+        // モデルが function tool の呼び出しを求めるときも response.done で届く。
+        // このアプリでは検索の1種類しかツールを渡さないため、最初の1件だけ扱う。
+        "response.done" => match take_tool_call(&value) {
+            Some(event) => event,
+            None => ServerEvent::ResponseFinished,
+        },
 
         "error" => ServerEvent::Reported {
             code: value
@@ -211,6 +246,25 @@ fn take_base64(value: &Value, key: &str) -> Option<Vec<u8>> {
     BASE64.decode(encoded).ok().filter(|bytes| !bytes.is_empty())
 }
 
+/// `response.done` の `response.output` から最初の function_call を取り出す。
+fn take_tool_call(value: &Value) -> Option<ServerEvent> {
+    let output = value.pointer("/response/output")?.as_array()?;
+
+    let call = output
+        .iter()
+        .find(|item| item.get("type").and_then(Value::as_str) == Some("function_call"))?;
+
+    Some(ServerEvent::ToolCallRequested {
+        call_id: call.get("call_id").and_then(Value::as_str)?.to_string(),
+        name: call.get("name").and_then(Value::as_str)?.to_string(),
+        arguments: call
+            .get("arguments")
+            .and_then(Value::as_str)
+            .unwrap_or("{}")
+            .to_string(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -221,6 +275,7 @@ mod tests {
             voice: "marin".to_string(),
             audio_format: AudioFormat::Ulaw,
             instructions: "やさしく はなしてね".to_string(),
+            tools: Vec::new(),
         }
     }
 
@@ -286,6 +341,28 @@ mod tests {
         assert_eq!(
             value["session"]["audio"]["input"]["transcription"]["language"],
             "ja"
+        );
+    }
+
+    #[test]
+    fn session_update_omits_tools_when_none_are_given() {
+        let value = parsed(&build_session_update(&setup()));
+
+        assert!(value.pointer("/session/tools").is_none());
+        assert!(value.pointer("/session/tool_choice").is_none());
+    }
+
+    #[test]
+    fn session_update_carries_the_given_tools() {
+        let value = parsed(&build_session_update(&SessionSetup {
+            tools: vec![crate::search::tool_definition()],
+            ..setup()
+        }));
+
+        assert_eq!(value["session"]["tool_choice"], "auto");
+        assert_eq!(
+            value["session"]["tools"][0]["name"],
+            crate::search::TOOL_NAME
         );
     }
 
@@ -392,6 +469,55 @@ mod tests {
                 message: "type が足りない".to_string(),
             })
         );
+    }
+
+    #[test]
+    fn reads_a_tool_call_from_response_done() {
+        let payload = json!({
+            "type": "response.done",
+            "response": {
+                "output": [{
+                    "type": "function_call",
+                    "call_id": "call_123",
+                    "name": "search_web",
+                    "arguments": "{\"query\":\"きょうりゅう\"}",
+                }],
+            },
+        })
+        .to_string();
+
+        assert_eq!(
+            parse_server_event(&payload),
+            Ok(ServerEvent::ToolCallRequested {
+                call_id: "call_123".to_string(),
+                name: "search_web".to_string(),
+                arguments: "{\"query\":\"きょうりゅう\"}".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn response_done_without_a_tool_call_still_finishes_the_response() {
+        let payload = json!({
+            "type": "response.done",
+            "response": { "output": [{ "type": "message" }] },
+        })
+        .to_string();
+
+        assert_eq!(
+            parse_server_event(&payload),
+            Ok(ServerEvent::ResponseFinished)
+        );
+    }
+
+    #[test]
+    fn function_call_output_carries_the_call_id_and_result() {
+        let value = parsed(&build_function_call_output("call_123", "きょうりゅうの はなし"));
+
+        assert_eq!(value["type"], "conversation.item.create");
+        assert_eq!(value["item"]["type"], "function_call_output");
+        assert_eq!(value["item"]["call_id"], "call_123");
+        assert_eq!(value["item"]["output"], "きょうりゅうの はなし");
     }
 
     #[test]

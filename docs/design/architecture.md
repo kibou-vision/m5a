@@ -89,7 +89,15 @@ classDiagram
     AudioDelta
     AssistantSaid / ChildSaid
     ResponseFinished
+    ToolCallRequested
     Reported / Ignored
+  }
+
+  class SearchQuery {
+    +tool_definition() Value
+    +build_request(query, api_key) SearchRequest
+    +extract_query(arguments) Option~String~
+    +parse_response(body) Option~String~
   }
 
   class FaceAnimator {
@@ -122,6 +130,8 @@ classDiagram
   Config --> ConfigError : 失敗
   Config --> SessionSetup : モデル・声・形式
   Guardrail --> SessionSetup : 指示文
+  SearchQuery --> SessionSetup : tool定義
+  ServerEvent --> SearchQuery : ToolCallRequested
   AppState --> FaceAnimator : 表情を決める
   FaceAnimator --> FaceFrame : 生成
   ServerEvent --> LogEntry : 文字起こしを記録
@@ -141,6 +151,7 @@ classDiagram
 | `layout` | 表情を画面のどこにどの色で置くかを決める |
 | `guardrail` | 指示文の組み立てと、文字起こしの検査 |
 | `realtime` | Realtime API の電文の組み立てと解析 |
+| `search` | web検索（Tavily）の tool 定義・リクエストの組み立て・結果の解析 |
 | `audio` | μ-law 変換、標本化周波数の変換、音量の算出 |
 | `logbook` | 会話ログの整形と追記 |
 
@@ -152,6 +163,7 @@ classDiagram
 | `hal::face` | 配置を LVGL の部品に反映する |
 | `hal::touch` | LVGL が読んだ指の状態から押下・解放を取り出す |
 | `hal::storage` | カード上のファイル操作（`Storage` の実装） |
+| `hal::search` | Tavily への実際の HTTPS 通信（別スレッド + チャンネル） |
 | `main` | 起動順序の制御と、状態遷移にもとづく処理の実行 |
 
 BSP が引き受けている範囲は次のとおり。自前で持たない。

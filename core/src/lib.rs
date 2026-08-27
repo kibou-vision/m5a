@@ -11,4 +11,5 @@ pub mod layout;
 pub mod logbook;
 pub mod ports;
 pub mod realtime;
+pub mod search;
 pub mod state;

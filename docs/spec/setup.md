@@ -22,10 +22,15 @@
 | `openai` | `model` | 使うモデル | 可（`gpt-realtime-2.1-mini`） |
 | `openai` | `voice` | 声の種類 | 可（`marin`） |
 | `openai` | `audio_format` | `ulaw` または `pcm16` | 可（`ulaw`） |
+| `search` | `api_key` | Tavily の APIキー。web検索を使う場合のみ記入する | 可（空欄なら検索を使わない） |
 
 `voice` に使える値は
 `alloy` / `ash` / `ballad` / `coral` / `echo` / `sage` / `shimmer` / `verse` /
 `marin` / `cedar`。OpenAI は `marin` と `cedar` を推奨している。
+
+`search.api_key` は [Tavily](https://www.tavily.com/) の無料アカウントで
+発行できる。空欄のままなら、アシスタントはモデルが知っている範囲でだけ
+答え、web検索は行わない。
 
 ## 記入漏れの扱い
 
