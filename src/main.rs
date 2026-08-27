@@ -25,6 +25,9 @@ use hal::storage::SdStorage;
 use hal::touch::{TouchChange, TouchReader};
 use hal::wifi;
 
+/// 画面の明るさ。暗い部屋でもまぶしくない程度に抑える。
+const SCREEN_BRIGHTNESS: u8 = 50;
+
 /// 顔を描き直す間隔。まばたきが滑らかに見える程度に保つ。
 const FRAME_INTERVAL_MS: u32 = 40;
 /// ひとつのきっかけから連鎖する処理の上限。取り違えで回り続けるのを防ぐ。
@@ -51,7 +54,7 @@ fn main() -> Result<()> {
 
     board::init_bus()?;
     board::start_display()?;
-    board::set_brightness(100)?;
+    board::set_brightness(SCREEN_BRIGHTNESS)?;
     board::report_memory("画面の準備後");
 
     let settings = read_settings();

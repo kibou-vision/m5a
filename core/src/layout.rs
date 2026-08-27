@@ -10,8 +10,8 @@ pub const SCREEN_WIDTH: i16 = 320;
 pub const SCREEN_HEIGHT: i16 = 240;
 
 /// 目の中心。
-const LEFT_EYE_CENTER: Point = Point::new(104, 96);
-const RIGHT_EYE_CENTER: Point = Point::new(216, 96);
+const LEFT_EYE_CENTER: Point = Point::new(92, 96);
+const RIGHT_EYE_CENTER: Point = Point::new(228, 96);
 const EYE_WIDTH: u16 = 72;
 const EYE_HEIGHT: u16 = 72;
 /// 閉じきっても線として見えるようにする下限。
@@ -52,7 +52,8 @@ const MIC_BASE_HEIGHT: u16 = 4;
 /// 読み込み中に出す印の大きさ。
 const SPINNER_DIAMETER: u16 = 72;
 
-const CALM_BACKGROUND: Color = Color::new(16, 26, 46);
+/// 落ち着いているときの背景。黒にして顔だけが浮かんで見えるようにする。
+const CALM_BACKGROUND: Color = Color::new(0, 0, 0);
 const TROUBLE_BACKGROUND: Color = Color::new(96, 28, 24);
 
 const EYE_COLOR: Color = Color::new(245, 250, 255);

@@ -22,9 +22,16 @@ const SPINNER_THICKNESS: i32 = 8;
 /// 読み込みの印が一周する時間と、弧の長さ。
 const SPINNER_PERIOD_MS: u32 = 1_000;
 const SPINNER_ARC_DEGREES: u32 = 60;
+/// 読み込みの印の大きさ。
+const SPINNER_SIZE: i32 = 72;
 
 /// 画面に置かれた顔。
 pub struct FaceView {
+    /// 顔の部品をまとめる入れ物。
+    ///
+    /// 読み込み中はこれごと隠す。部品を一つずつ隠すと、
+    /// 見せ直すときに取りこぼす（実際に口だけ消えたことがある）。
+    face: *mut bsp::lv_obj_t,
     left_eye: *mut bsp::lv_obj_t,
     right_eye: *mut bsp::lv_obj_t,
     left_pupil: *mut bsp::lv_obj_t,
@@ -51,19 +58,20 @@ impl FaceView {
     pub fn create() -> Self {
         unsafe {
             let screen = bsp::lv_screen_active();
+            let face = make_group(screen);
 
-            let left_eye = make_panel(screen);
-            let right_eye = make_panel(screen);
-            let left_pupil = make_panel(screen);
-            let right_pupil = make_panel(screen);
-            let mouth = make_panel(screen);
-            let mouth_cover = make_panel(screen);
-            let left_brow = make_line(screen);
-            let right_brow = make_line(screen);
-            let button = make_panel(screen);
-            let mic_head = make_panel(screen);
-            let mic_stem = make_panel(screen);
-            let mic_base = make_panel(screen);
+            let left_eye = make_panel(face);
+            let right_eye = make_panel(face);
+            let left_pupil = make_panel(face);
+            let right_pupil = make_panel(face);
+            let mouth = make_panel(face);
+            let mouth_cover = make_panel(face);
+            let left_brow = make_line(face);
+            let right_brow = make_line(face);
+            let button = make_panel(face);
+            let mic_head = make_panel(face);
+            let mic_stem = make_panel(face);
+            let mic_base = make_panel(face);
             let spinner = make_spinner(screen);
 
             for part in [left_eye, right_eye, left_pupil, right_pupil, button, mic_head] {
@@ -85,6 +93,7 @@ impl FaceView {
             }
 
             Self {
+                face,
                 left_eye,
                 right_eye,
                 left_pupil,
@@ -123,14 +132,15 @@ impl FaceView {
 
         // 立ち上げ中は顔を見せず、読み込みの印だけにする。
         // 起動のたびに困り顔が出ると、子どもが不安になる。
-        show_at(self.spinner, layout.spinner);
+        // 印の位置は作るときに中央へ寄せてあるので、ここでは見せ隠しだけ行う。
         if layout.is_loading() {
-            self.hide_face();
+            show(self.spinner);
+            hide(self.face);
             return;
         }
+        hide(self.spinner);
+        show(self.face);
 
-        show(self.left_eye);
-        show(self.right_eye);
         place(self.left_eye, layout.left_eye);
         place(self.right_eye, layout.right_eye);
         show_at(self.left_pupil, layout.left_pupil);
@@ -139,30 +149,9 @@ impl FaceView {
         self.write_mouth(layout);
         self.write_brows(layout);
 
-        show(self.button);
         place(self.button, layout.button);
         paint(self.button, layout.button_color);
         self.write_microphone(layout.microphone);
-    }
-
-    /// 顔の部品をまとめて隠す。
-    unsafe fn hide_face(&mut self) {
-        for part in [
-            self.left_eye,
-            self.right_eye,
-            self.left_pupil,
-            self.right_pupil,
-            self.mouth,
-            self.mouth_cover,
-            self.left_brow,
-            self.right_brow,
-            self.button,
-            self.mic_head,
-            self.mic_stem,
-            self.mic_base,
-        ] {
-            hide(part);
-        }
     }
 
     /// マイクの絵を置く。押せる場所は画面全体だが、ここを目印にしてもらう。
@@ -170,10 +159,6 @@ impl FaceView {
         place(self.mic_head, microphone.head);
         place(self.mic_stem, microphone.stem);
         place(self.mic_base, microphone.base);
-
-        for part in [self.mic_head, self.mic_stem, self.mic_base] {
-            show(part);
-        }
     }
 
     unsafe fn write_mouth(&mut self, layout: &FaceLayout) {
@@ -225,6 +210,25 @@ impl FaceView {
     }
 }
 
+/// 顔の部品をまとめる、透明で画面いっぱいの入れ物を作る。
+unsafe fn make_group(parent: *mut bsp::lv_obj_t) -> *mut bsp::lv_obj_t {
+    let group = bsp::lv_obj_create(parent);
+
+    bsp::lv_obj_remove_style_all(group);
+    bsp::lv_obj_set_size(
+        group,
+        i32::from(layout::SCREEN_WIDTH),
+        i32::from(layout::SCREEN_HEIGHT),
+    );
+    bsp::lv_obj_set_pos(group, 0, 0);
+    bsp::lv_obj_remove_flag(
+        group,
+        bsp::lv_obj_flag_t_LV_OBJ_FLAG_SCROLLABLE | bsp::lv_obj_flag_t_LV_OBJ_FLAG_CLICKABLE,
+    );
+
+    group
+}
+
 /// 枠も余白も持たない、色を塗るだけの板を作る。
 unsafe fn make_panel(parent: *mut bsp::lv_obj_t) -> *mut bsp::lv_obj_t {
     let panel = bsp::lv_obj_create(parent);
@@ -241,10 +245,17 @@ unsafe fn make_panel(parent: *mut bsp::lv_obj_t) -> *mut bsp::lv_obj_t {
 }
 
 /// くるくる回る読み込みの印を作る。
+///
+/// 大きさを決めてから中央に寄せる。位置を数値で指定すると、
+/// 部品の既定の大きさが確定する前に置かれて左上に寄ってしまう。
 unsafe fn make_spinner(parent: *mut bsp::lv_obj_t) -> *mut bsp::lv_obj_t {
     let spinner = bsp::lv_spinner_create(parent);
 
     bsp::lv_spinner_set_anim_params(spinner, SPINNER_PERIOD_MS, SPINNER_ARC_DEGREES);
+    bsp::lv_obj_set_size(spinner, SPINNER_SIZE, SPINNER_SIZE);
+    bsp::lv_obj_center(spinner);
+    // 置き場所が決まるまでは見せない。
+    hide(spinner);
     bsp::lv_obj_set_style_arc_width(spinner, SPINNER_THICKNESS, MAIN_PART);
     bsp::lv_obj_set_style_arc_color(spinner, color_of(layout::spinner_color()), INDICATOR_PART);
     bsp::lv_obj_set_style_arc_width(spinner, SPINNER_THICKNESS, INDICATOR_PART);
