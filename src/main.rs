@@ -354,7 +354,10 @@ impl Runtime {
 
     /// 録音中の沈黙を追跡し、話し終わり（または声が無いまま）を判定する。
     fn poll_turn(&mut self, elapsed_ms: u32) -> Option<AppEvent> {
+        self.turn.as_ref()?;
         let level = self.audio.as_ref().map_or(0, Audio::input_level);
+        // しきい値が実機に合っているか、後で確かめられるように残す。
+        log::debug!("マイクの音量: {level}");
         let outcome = self.turn.as_mut()?.observe(level, elapsed_ms)?;
 
         Some(match outcome {
