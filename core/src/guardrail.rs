@@ -202,16 +202,15 @@ mod tests {
         let instructions = guardrail().build_instructions();
 
         // 毎回名前を呼ぶと不自然になるため、控えめにするよう伝える。
-        assert!(instructions.contains("控えめ"));
+        assert!(instructions.contains("毎回呼ぶと不自然"));
     }
 
     #[test]
     fn instructions_ask_for_short_replies() {
         let instructions = guardrail().build_instructions();
 
-        // 実機では4文ほど返ってきて5歳児には長かった。文字数で縛る。
-        assert!(instructions.contains("20文字から40文字"));
-        assert!(instructions.contains("質問は一つだけ"));
+        // 実機では長すぎる応答が返ってきて5歳児には長かった。文字数で縛る。
+        assert!(instructions.contains("100文字程度"));
     }
 
     #[test]

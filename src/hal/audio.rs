@@ -6,7 +6,7 @@
 //! コーデックの初期化順序やレジスタ列は BSP が引き受けるため、
 //! ここでは開いて読み書きするだけにする。
 
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 use std::sync::mpsc::{sync_channel, Receiver, RecvTimeoutError, SyncSender};
 use std::sync::Arc;
 use std::thread;
@@ -22,8 +22,14 @@ const DEVICE_RATE: u32 = 16_000;
 /// 一度に扱う長さ。短いほど声の出だしが早く相手に届く。
 const CHUNK_MS: usize = 20;
 const CHUNK_SAMPLES: usize = DEVICE_RATE as usize * CHUNK_MS / 1_000;
-/// 待ち行列の深さ。溢れたら捨てて、遅れを溜めないようにする。
-const QUEUE_DEPTH: usize = 24;
+/// 録音の待ち行列の深さ。溢れたら捨てて、遅れを溜めないようにする。
+const CAPTURE_QUEUE_DEPTH: usize = 24;
+/// 再生の待ち行列の深さ。
+///
+/// サーバーは音声をリアルタイムより速く送ってくることがあり、
+/// 短いと数百ミリ秒の話でも一瞬で溢れて音を取りこぼす。PSRAM に余裕が
+/// あるため、長い応答でも溜めておけるだけの深さを持たせる（20ms×750=15秒分）。
+const PLAYBACK_QUEUE_DEPTH: usize = 750;
 /// 音声を扱う仕事の作業領域。
 /// 内部メモリは SD カードの DMA バッファと取り合いになるため切り詰める。
 const THREAD_STACK: usize = 5 * 1_024;
@@ -70,6 +76,16 @@ pub struct Audio {
     capturing: Arc<AtomicBool>,
     /// いま鳴っている音の大きさ。口の開きに使う。
     level: Arc<AtomicU8>,
+    /// 実際に応答の音声を鳴らしている最中かどうか。
+    ///
+    /// サーバーの「応答が終わった」知らせは、まだ再生しきっていない分が
+    /// 待ち行列に残っている段階で届くため、口を閉じる判断はこちらで行う。
+    speaking: Arc<AtomicBool>,
+    /// 再生が追いつかず捨てた回数。
+    dropped: Arc<AtomicUsize>,
+    /// 立てると、再生の仕事が待ち行列に溜まっている分を鳴らさずに捨てる。
+    /// 割り込みで応答を打ち切ったとき、溜めておいた分が後から鳴るのを防ぐ。
+    flush: Arc<AtomicBool>,
 }
 
 impl Audio {
@@ -90,7 +106,7 @@ impl Audio {
         set_gain(&microphone, MICROPHONE_GAIN_DB);
 
         let capturing = Arc::new(AtomicBool::new(false));
-        let (captured_tx, captured) = sync_channel(QUEUE_DEPTH);
+        let (captured_tx, captured) = sync_channel(CAPTURE_QUEUE_DEPTH);
         spawn_capture(microphone, format, capturing.clone(), captured_tx)?;
 
         // 読み取りが始まってクロックが安定するのを待つ。
@@ -104,14 +120,19 @@ impl Audio {
         restore_amplifier_gain(&speaker);
 
         let level = Arc::new(AtomicU8::new(0));
-        let (to_play, playing) = sync_channel(QUEUE_DEPTH);
-        spawn_playback(speaker, format, level.clone(), playing)?;
+        let speaking = Arc::new(AtomicBool::new(false));
+        let flush = Arc::new(AtomicBool::new(false));
+        let (to_play, playing) = sync_channel(PLAYBACK_QUEUE_DEPTH);
+        spawn_playback(speaker, format, level.clone(), speaking.clone(), flush.clone(), playing)?;
 
         Ok(Self {
             captured,
             to_play,
             capturing,
             level,
+            speaking,
+            dropped: Arc::new(AtomicUsize::new(0)),
+            flush,
         })
     }
 
@@ -133,7 +154,9 @@ impl Audio {
     /// 応答の音声を鳴らす。追いつかないときは捨てて遅れを溜めない。
     pub fn play(&self, audio: Vec<u8>) {
         if self.to_play.try_send(audio).is_err() {
-            log::debug!("再生が追いつかないため音を捨てました");
+            let total = self.dropped.fetch_add(1, Ordering::Relaxed) + 1;
+            let free = unsafe { esp_idf_svc::sys::esp_get_free_heap_size() };
+            log::warn!("再生が追いつかないため音を捨てました（累計{total}回、空きヒープ{free}バイト）");
         }
     }
 
@@ -142,9 +165,18 @@ impl Audio {
         self.level.load(Ordering::Relaxed)
     }
 
-    /// 鳴らし終えたことにする。口を閉じるために音量を戻す。
-    pub fn silence(&self) {
+    /// 応答の音声を、まだ鳴らしきっていないか。
+    pub fn is_speaking(&self) -> bool {
+        self.speaking.load(Ordering::Relaxed)
+    }
+
+    /// 割り込みで応答を打ち切る。口を閉じ、溜まっている分も鳴らさず捨てる。
+    ///
+    /// ここでだけ待ち行列を空にする。捨てずに残すと、打ち切ったはずの
+    /// 古い応答が次の会話に被さって鳴ってしまう。
+    pub fn interrupt(&self) {
         self.level.store(0, Ordering::Relaxed);
+        self.flush.store(true, Ordering::Relaxed);
     }
 }
 
@@ -261,6 +293,8 @@ fn spawn_playback(
     speaker: Codec,
     format: AudioFormat,
     level: Arc<AtomicU8>,
+    speaking: Arc<AtomicBool>,
+    flush: Arc<AtomicBool>,
     playing: Receiver<Vec<u8>>,
 ) -> Result<()> {
     thread::Builder::new()
@@ -272,11 +306,18 @@ fn spawn_playback(
             let silence_samples = DEVICE_RATE as usize * IDLE_SILENCE.as_millis() as usize / 1_000;
 
             loop {
+                if flush.swap(false, Ordering::Relaxed) {
+                    while playing.try_recv().is_ok() {}
+                    level.store(0, Ordering::Relaxed);
+                    speaking.store(false, Ordering::Relaxed);
+                }
+
                 let mut samples = match playing.recv_timeout(IDLE_SILENCE) {
                     Ok(chunk) => {
                         played += 1;
                         let samples = decode(&chunk, format);
                         level.store(waveform::measure_level(&samples), Ordering::Relaxed);
+                        speaking.store(true, Ordering::Relaxed);
 
                         if played % 50 == 1 {
                             let peak =
@@ -292,6 +333,7 @@ fn spawn_playback(
                     // 黙っている間もクロックを保つため無音を送る。
                     Err(RecvTimeoutError::Timeout) => {
                         level.store(0, Ordering::Relaxed);
+                        speaking.store(false, Ordering::Relaxed);
                         vec![0_i16; silence_samples]
                     }
                     Err(RecvTimeoutError::Disconnected) => break,

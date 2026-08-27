@@ -111,6 +111,9 @@ struct Runtime {
     storage: SdStorage,
     /// 進行中のweb検索。呼び出しのcall_idと、結果を待つ受け口。
     pending_search: Option<(String, Receiver<Option<String>>)>,
+    /// サーバーからは応答終了の知らせが届いたが、まだ再生しきっていない分がある。
+    /// 実際に鳴らし終わってから状態遷移のきっかけを起こす。
+    finishing_response: bool,
 }
 
 impl Runtime {
@@ -132,6 +135,7 @@ impl Runtime {
             pending_logs: Vec::new(),
             storage: SdStorage::new(),
             pending_search: None,
+            finishing_response: false,
         }
     }
 
@@ -146,11 +150,13 @@ impl Runtime {
             }
             AppAction::CancelResponse => {
                 self.tell(&realtime::build_response_cancel());
-                self.silence();
+                self.interrupt_audio();
                 // 途中で遮っても、そこまで言った分は残す。
                 self.flush_spoken();
                 // 検索中に遮られたら、遅れて届く結果は捨てる。
                 self.pending_search = None;
+                // 鳴らしきるのを待つ必要はなくなった。
+                self.finishing_response = false;
                 None
             }
             AppAction::StartCapture => {
@@ -172,10 +178,9 @@ impl Runtime {
                 None
             }
             AppAction::StartPlayback => None,
-            AppAction::StopPlayback => {
-                self.silence();
-                None
-            }
+            // 口を閉じるのは再生の仕事自身に任せる。ここで閉じると、
+            // まだキューに残っている分の音より先に口が閉じてしまう。
+            AppAction::StopPlayback => None,
             AppAction::ShowSetupGuide => {
                 log::warn!("せっていを かきこんで ください");
                 None
@@ -331,9 +336,23 @@ impl Runtime {
         self.audio.as_ref().map_or(0, Audio::level)
     }
 
-    fn silence(&mut self) {
+    /// 応答終了の知らせを待たせていたら、実際に鳴らし終わったか確かめる。
+    fn poll_playback(&mut self) -> Option<AppEvent> {
+        if !self.finishing_response {
+            return None;
+        }
+        if self.audio.as_ref().is_some_and(Audio::is_speaking) {
+            return None;
+        }
+
+        self.finishing_response = false;
+        Some(AppEvent::ResponseFinished)
+    }
+
+    /// 割り込みで応答を打ち切る。溜めていた音声も鳴らさず捨てる。
+    fn interrupt_audio(&mut self) {
         if let Some(audio) = self.audio.as_ref() {
-            audio.silence();
+            audio.interrupt();
         }
     }
 
@@ -377,9 +396,17 @@ impl Runtime {
                 self.record(Speaker::Child, text);
                 None
             }
+            // サーバーは音声をリアルタイムより速く送ってくるため、この知らせが
+            // 届いた時点でもまだ再生しきっていない分が残っていることがある。
+            // 状態遷移は鳴らし終わってから起こす（poll_playback を参照）。
             ServerEvent::ResponseFinished => {
                 self.flush_spoken();
-                Some(AppEvent::ResponseFinished)
+                if self.audio.as_ref().is_some_and(Audio::is_speaking) {
+                    self.finishing_response = true;
+                    None
+                } else {
+                    Some(AppEvent::ResponseFinished)
+                }
             }
             ServerEvent::ToolCallRequested { call_id, name, arguments } => {
                 self.handle_tool_call(&call_id, &name, &arguments);
@@ -534,6 +561,9 @@ fn run(modem: Modem<'static>, settings: Result<Config, ConfigError>) -> Result<(
         runtime.poll_search();
 
         while let Some(event) = runtime.receive() {
+            advance(&mut state, &mut runtime, event);
+        }
+        if let Some(event) = runtime.poll_playback() {
             advance(&mut state, &mut runtime, event);
         }
 

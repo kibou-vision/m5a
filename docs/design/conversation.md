@@ -89,9 +89,12 @@ sequenceDiagram
 
   API-->>Proto: response.done
   Proto-->>Main: ResponseFinished
+  Main->>Log: アシスタントの発話を追記
+  Note over Main,Audio: サーバーは音声をリアルタイムより速く送るため、<br/>ここではまだ再生の待ち行列が残っていることがある
+  Main->>Audio: is_speaking() で鳴らし終わりを待つ
+  Audio-->>Main: 鳴らし終わった
   Main->>State: ResponseFinished
   State-->>Main: Ready ＋ StopPlayback
-  Main->>Log: アシスタントの発話を追記
 ```
 
 ## ガードレールの割り込み
