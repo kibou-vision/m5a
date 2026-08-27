@@ -24,11 +24,12 @@ const GAZE_SWAY_PERIOD_MS: f32 = 1_800.0;
 /// 視線が正面から向きへ移り、また正面へ戻るのにかける長さ。
 /// 途中の向きを増やし、瞬間的に切り替わらずなめらかに動くようにする。
 const IDLE_GLANCE_TRANSITION_MS: u64 = 100;
-/// 向きへ着いてから戻り始めるまで留める長さ。
-const IDLE_GLANCE_PLATEAU_MS: u64 = 500;
-/// 待機中、流し目を保つ長さ。行き（遷移）・留まり・帰り（遷移）の合計。
-const IDLE_GLANCE_HOLD_MS: u64 =
-    IDLE_GLANCE_TRANSITION_MS + IDLE_GLANCE_PLATEAU_MS + IDLE_GLANCE_TRANSITION_MS;
+/// 向きへ着いてから戻り始めるまで留める長さの最短。
+const IDLE_GLANCE_PLATEAU_MIN_MS: u64 = 800;
+/// 向きへ着いてから戻り始めるまで留める長さの振れ幅。
+/// 一定だと機械的に見えるため、最短からこの幅ぶん散らす
+/// （800〜2,800ms の範囲になる）。
+const IDLE_GLANCE_PLATEAU_SPREAD_MS: u64 = 2_000;
 /// 流し目の最短間隔。
 const IDLE_GLANCE_MIN_INTERVAL_MS: u64 = 4_000;
 /// 流し目の間隔の振れ幅。
@@ -148,6 +149,9 @@ pub struct FaceAnimator {
     idle_glance: Glance,
     next_idle_glance_at_ms: u64,
     idle_glance_started_at_ms: Option<u64>,
+    /// 現在の流し目にかける長さ（行き・留まり・帰りの合計）。
+    /// 留まりの長さを毎回散らすため、開始のたびに決め直す。
+    idle_glance_hold_ms: u64,
     /// まばたき間隔などを散らすための擬似乱数の種。
     seed: u32,
 }
@@ -171,6 +175,8 @@ impl FaceAnimator {
             idle_glance: Glance::Center,
             next_idle_glance_at_ms: IDLE_GLANCE_MIN_INTERVAL_MS,
             idle_glance_started_at_ms: None,
+            // 最初の流し目が始まるときに決め直すので、値そのものは使われない。
+            idle_glance_hold_ms: IDLE_GLANCE_TRANSITION_MS * 2 + IDLE_GLANCE_PLATEAU_MIN_MS,
             seed: 0x5A5A_1234,
         }
     }
@@ -248,15 +254,18 @@ impl FaceAnimator {
         }
 
         match self.idle_glance_started_at_ms {
-            Some(started) if now_ms >= started + IDLE_GLANCE_HOLD_MS => {
+            Some(started) if now_ms >= started + self.idle_glance_hold_ms => {
+                self.next_idle_glance_at_ms =
+                    started + self.idle_glance_hold_ms + self.pick_idle_glance_interval();
                 self.idle_glance_started_at_ms = None;
                 self.idle_glance = Glance::Center;
-                self.next_idle_glance_at_ms =
-                    started + IDLE_GLANCE_HOLD_MS + self.pick_idle_glance_interval();
             }
             None if now_ms >= self.next_idle_glance_at_ms => {
                 self.idle_glance_started_at_ms = Some(now_ms);
                 self.idle_glance = self.pick_glance_direction();
+                // 留まりの長さを毎回散らし、機械的な間隔に見えないようにする。
+                self.idle_glance_hold_ms =
+                    IDLE_GLANCE_TRANSITION_MS + self.pick_idle_glance_plateau() + IDLE_GLANCE_TRANSITION_MS;
             }
             _ => {}
         }
@@ -266,6 +275,13 @@ impl FaceAnimator {
         self.seed = self.seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
         let spread = u64::from(self.seed >> 16) % IDLE_GLANCE_INTERVAL_SPREAD_MS;
         IDLE_GLANCE_MIN_INTERVAL_MS + spread
+    }
+
+    /// 流し目の向きを留める長さを 800〜2,800ms の範囲で散らす。
+    fn pick_idle_glance_plateau(&mut self) -> u64 {
+        self.seed = self.seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        let spread = u64::from(self.seed >> 16) % IDLE_GLANCE_PLATEAU_SPREAD_MS;
+        IDLE_GLANCE_PLATEAU_MIN_MS + spread
     }
 
     /// 左・右・上・下の4パターンから流し目の向きを選ぶ。
@@ -335,7 +351,7 @@ impl FaceAnimator {
         };
 
         let elapsed = now_ms.saturating_sub(started) as f32;
-        let hold = IDLE_GLANCE_HOLD_MS as f32;
+        let hold = self.idle_glance_hold_ms as f32;
         let transition = IDLE_GLANCE_TRANSITION_MS as f32;
 
         let ratio = if elapsed < transition {
@@ -575,7 +591,7 @@ mod tests {
     }
 
     #[test]
-    fn idle_glance_timing_is_100_500_100() {
+    fn idle_glance_transitions_take_100ms_each_way() {
         let mut animator = FaceAnimator::new();
         animator.set_expression(Expression::Idle);
 
@@ -588,6 +604,7 @@ mod tests {
             }
         }
         let started = started.expect("流し目が始まらなかった");
+        let hold = animator.idle_glance_hold_ms;
 
         let magnitude_at = |animator: &mut FaceAnimator, offset: u64| -> i8 {
             let frame = animator.frame_at(started + offset);
@@ -601,15 +618,46 @@ mod tests {
             "100msで向きに達するはず"
         );
         assert_eq!(
-            magnitude_at(&mut animator, IDLE_GLANCE_TRANSITION_MS + IDLE_GLANCE_PLATEAU_MS),
+            magnitude_at(&mut animator, hold - IDLE_GLANCE_TRANSITION_MS),
             IDLE_GLANCE_MAGNITUDE,
-            "500ms留まる間は向きを保つはず"
+            "戻り始めの直前まで向きを保つはず"
         );
-        assert_eq!(
-            magnitude_at(&mut animator, IDLE_GLANCE_HOLD_MS),
-            0,
-            "そこから100msで正面へ戻るはず"
-        );
+        assert_eq!(magnitude_at(&mut animator, hold), 0, "そこから100msで正面へ戻るはず");
+    }
+
+    #[test]
+    fn idle_glance_hold_stays_within_800_to_2800ms_of_plateau() {
+        let mut animator = FaceAnimator::new();
+        animator.set_expression(Expression::Idle);
+
+        let min_hold = IDLE_GLANCE_TRANSITION_MS * 2 + IDLE_GLANCE_PLATEAU_MIN_MS;
+        let max_hold =
+            IDLE_GLANCE_TRANSITION_MS * 2 + IDLE_GLANCE_PLATEAU_MIN_MS + IDLE_GLANCE_PLATEAU_SPREAD_MS - 1;
+
+        let mut saw_short = false;
+        let mut saw_long = false;
+        let mut last_started = None;
+        for t in (0..600_000).step_by(20) {
+            animator.frame_at(t);
+            if animator.idle_glance_started_at_ms != last_started {
+                last_started = animator.idle_glance_started_at_ms;
+                if last_started.is_some() {
+                    let hold = animator.idle_glance_hold_ms;
+                    assert!(
+                        (min_hold..=max_hold).contains(&hold),
+                        "留まりを含む長さ {hold} が 800〜2,800ms の範囲を外れた"
+                    );
+                    if hold < (min_hold + max_hold) / 2 {
+                        saw_short = true;
+                    } else {
+                        saw_long = true;
+                    }
+                }
+            }
+        }
+
+        assert!(saw_short, "短めの留まりも起きるはず");
+        assert!(saw_long, "長めの留まりも起きるはず");
     }
 
     #[test]
