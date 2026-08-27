@@ -62,17 +62,25 @@ pub fn touch_device() -> *mut bsp::lv_indev_t {
     unsafe { bsp::bsp_display_get_input_dev() }
 }
 
-/// いま使える内部メモリの様子。連続して確保できる大きさが要点になる。
+/// いま使える内部メモリの様子。
 ///
-/// LVGL の描画バッファと Wi-Fi が内部 DRAM を大きく使うため、
-/// あとから仕事を作れなくなることがある。
+/// LVGL の描画バッファ・Wi-Fi・音声が内部 DRAM を大きく使うため、
+/// PSRAM が空いていても仕事や DMA バッファを作れなくなることがある。
 pub fn report_memory(stage: &str) {
     let free = unsafe { esp_idf_svc::sys::esp_get_free_heap_size() };
-    let largest = unsafe {
-        esp_idf_svc::sys::heap_caps_get_largest_free_block(
-            esp_idf_svc::sys::MALLOC_CAP_INTERNAL | esp_idf_svc::sys::MALLOC_CAP_8BIT,
-        )
-    };
+    let internal = largest_free_block(esp_idf_svc::sys::MALLOC_CAP_INTERNAL);
+    let dma = dma_headroom();
 
-    log::info!("メモリ[{stage}]: 空き {free} バイト / 内部の最大連続 {largest} バイト");
+    log::info!(
+        "メモリ[{stage}]: 空き {free} / 内部の最大連続 {internal} / DMA の最大連続 {dma}"
+    );
+}
+
+/// DMA に使える連続した空き。SD カードへの書き込みはここから確保される。
+pub fn dma_headroom() -> usize {
+    largest_free_block(esp_idf_svc::sys::MALLOC_CAP_DMA)
+}
+
+fn largest_free_block(capability: u32) -> usize {
+    unsafe { esp_idf_svc::sys::heap_caps_get_largest_free_block(capability) }
 }

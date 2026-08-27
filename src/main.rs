@@ -17,6 +17,7 @@ use m5a_core::ports::StorageError;
 use m5a_core::realtime::{self, ServerEvent, SessionSetup};
 use m5a_core::state::{transition, AppAction, AppEvent, AppState, Failure};
 
+use hal::audio::Audio;
 use hal::board::{self, DisplayLock};
 use hal::face::FaceView;
 use hal::session::Session;
@@ -28,9 +29,15 @@ use hal::wifi;
 const FRAME_INTERVAL_MS: u32 = 40;
 /// ひとつのきっかけから連鎖する処理の上限。取り違えで回り続けるのを防ぐ。
 const MAX_FOLLOW_UPS: usize = 8;
+/// SD カードへ書く前に必要な DMA の空き。
+///
+/// SPI は書き込みのたびに DMA バッファを確保する。足りないまま呼ぶと
+/// ドライバが NULL を返したまま進み、内部で落ちてしまう。
+const SD_WRITE_HEADROOM: usize = 12 * 1_024;
+
 /// 失敗してからやり直すまでの待ち。
 /// 子どもが操作しなくても自力で戻れるように、放っておいても再試行する。
-const RETRY_DELAY_MS: u64 = 10_000;
+const RETRY_DELAY_MS: u64 = 3_000;
 
 fn main() -> Result<()> {
     esp_idf_svc::sys::link_patches();
@@ -83,6 +90,10 @@ struct Runtime {
     session: Option<Session>,
     /// 接続が確立したら送る設定。
     setup: Option<SessionSetup>,
+    audio: Option<Audio>,
+    /// 組み立て途中のアシスタントの発話。
+    /// 文字起こしは細切れに届くため、言い終えてからまとめて記録する。
+    spoken: String,
     storage: SdStorage,
 }
 
@@ -100,6 +111,8 @@ impl Runtime {
             clock: None,
             session: None,
             setup: None,
+            audio: None,
+            spoken: String::new(),
             storage: SdStorage::new(),
         }
     }
@@ -115,6 +128,32 @@ impl Runtime {
             }
             AppAction::CancelResponse => {
                 self.tell(&realtime::build_response_cancel());
+                self.silence();
+                // 途中で遮っても、そこまで言った分は残す。
+                self.flush_spoken();
+                None
+            }
+            AppAction::StartCapture => {
+                if let Some(audio) = self.audio.as_ref() {
+                    audio.begin_capture();
+                }
+                None
+            }
+            AppAction::StopCapture => {
+                if let Some(audio) = self.audio.as_ref() {
+                    audio.end_capture();
+                }
+                None
+            }
+            AppAction::RequestResponse => {
+                // 録音を確定してから応答を求める。順序を違えると空のまま返る。
+                self.tell(&realtime::build_audio_commit());
+                self.tell(&realtime::build_response_create());
+                None
+            }
+            AppAction::StartPlayback => None,
+            AppAction::StopPlayback => {
+                self.silence();
                 None
             }
             AppAction::ShowSetupGuide => {
@@ -127,11 +166,21 @@ impl Runtime {
                 self.record(Speaker::System, failure.describe());
                 None
             }
-            // 音声の取り込みと再生は次の段階で繋ぐ。
-            other => {
-                log::info!("依頼: {other:?}");
-                None
-            }
+        }
+    }
+
+    /// マイクとスピーカーを用意する。失敗しても画面と設定は使えるようにする。
+    fn open_audio(&mut self) {
+        if self.audio.is_some() {
+            return;
+        }
+        let Some(config) = self.config.as_ref() else {
+            return;
+        };
+
+        match Audio::start(config.openai.audio_format) {
+            Ok(audio) => self.audio = Some(audio),
+            Err(error) => log::warn!("音を使えません: {error:#}"),
         }
     }
 
@@ -209,6 +258,44 @@ impl Runtime {
         }
     }
 
+    /// 言い終えたアシスタントの発話を記録する。
+    fn flush_spoken(&mut self) {
+        if self.spoken.is_empty() {
+            return;
+        }
+
+        let spoken = std::mem::take(&mut self.spoken);
+        log::info!("アシスタント: {spoken}");
+        self.record(Speaker::Assistant, spoken);
+    }
+
+    /// 録音を送り出す。溜まっている分をまとめて流す。
+    fn push_captured(&mut self) {
+        let Some(audio) = self.audio.as_ref() else {
+            return;
+        };
+
+        let mut pending = Vec::new();
+        while let Some(chunk) = audio.take_captured() {
+            pending.push(chunk);
+        }
+
+        for chunk in pending {
+            self.tell(&realtime::build_audio_append(&chunk));
+        }
+    }
+
+    /// いま鳴っている音の大きさ。口の開きに使う。
+    fn voice_level(&self) -> u8 {
+        self.audio.as_ref().map_or(0, Audio::level)
+    }
+
+    fn silence(&mut self) {
+        if let Some(audio) = self.audio.as_ref() {
+            audio.silence();
+        }
+    }
+
     /// サーバへ電文を送る。切れていれば黙って捨てる。
     fn tell(&mut self, message: &str) {
         let Some(session) = self.session.as_mut() else {
@@ -229,20 +316,27 @@ impl Runtime {
                 None
             }
             ServerEvent::SessionConfigured => Some(AppEvent::SessionOpened),
-            ServerEvent::AudioDelta(_audio) => {
-                // 次の段階で再生に繋ぐ。
+            ServerEvent::AudioDelta(audio) => {
+                if let Some(player) = self.audio.as_ref() {
+                    player.play(audio);
+                }
                 Some(AppEvent::ResponseStarted)
             }
+            // 断片ごとに書くと、ひとつの発話で何十回も SD に書きに行くことになる。
             ServerEvent::AssistantSaid(text) => {
-                self.record(Speaker::Assistant, text);
+                self.spoken.push_str(&text);
                 None
             }
             ServerEvent::ChildSaid(text) => {
+                log::info!("こども: {text}");
                 self.watch_over(&text);
                 self.record(Speaker::Child, text);
                 None
             }
-            ServerEvent::ResponseFinished => Some(AppEvent::ResponseFinished),
+            ServerEvent::ResponseFinished => {
+                self.flush_spoken();
+                Some(AppEvent::ResponseFinished)
+            }
             // 多くは回復できるので、繋いだまま記録に留める。
             ServerEvent::Reported { code, message } => {
                 log::warn!("OpenAI からの知らせ: {message} ({code:?})");
@@ -271,7 +365,15 @@ impl Runtime {
     }
 
     /// 会話ログに1行残す。失敗しても対話は止めない。
+    ///
+    /// 対話そのものより優先度が低いので、メモリが足りないときは書かずに諦める。
     fn record(&mut self, speaker: Speaker, text: impl AsRef<str>) {
+        let headroom = board::dma_headroom();
+        if headroom < SD_WRITE_HEADROOM {
+            log::warn!("メモリが足りないためログを省きました（DMA の空き {headroom} バイト）");
+            return;
+        }
+
         let entry = LogEntry::new(wifi::now_unix(), speaker, text.as_ref());
 
         if let Err(error) = logbook::append_entry(&mut self.storage, &entry) {
@@ -298,6 +400,7 @@ fn run(modem: Modem<'static>, settings: Result<Config, ConfigError>) -> Result<(
     let mut touch = TouchReader::new(board::touch_device());
     let mut retry_at: Option<u64> = None;
 
+    runtime.open_audio();
     advance(&mut state, &mut runtime, startup);
     log::info!("画面の準備ができました");
 
@@ -309,6 +412,8 @@ fn run(modem: Modem<'static>, settings: Result<Config, ConfigError>) -> Result<(
                 advance(&mut state, &mut runtime, event);
             }
         }
+
+        runtime.push_captured();
 
         while let Some(event) = runtime.receive() {
             advance(&mut state, &mut runtime, event);
@@ -322,6 +427,7 @@ fn run(modem: Modem<'static>, settings: Result<Config, ConfigError>) -> Result<(
         }
 
         animator.set_expression(Expression::from_state(&state));
+        animator.set_voice_level(runtime.voice_level());
         let frame = animator.frame_at(now_ms);
         let placement = layout::lay_out_face(&frame);
 

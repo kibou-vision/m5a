@@ -14,9 +14,12 @@ use esp_idf_svc::ws::client::{
 use esp_idf_svc::ws::FrameType;
 use m5a_core::realtime::{self, ServerEvent, SessionSetup};
 
-/// 受信バッファ。ここを超える電文は組み立て直せないため、
-/// 音声の断片が余裕をもって収まる大きさにする。
-const RECEIVE_BUFFER: usize = 8 * 1024;
+/// 受信バッファ。
+///
+/// esp-idf-svc はこれを超える電文を組み立て直せず、切れた JSON がそのまま
+/// 届いてしまう。実測では音声の断片が 4KB を超えており、切り詰めると
+/// 応答の音声が丸ごと失われた。余裕を持たせること。
+const RECEIVE_BUFFER: usize = 16 * 1024;
 /// 接続を待つ上限。
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
 /// 通信が滞ったとみなすまでの時間。指定しないと警告とともに既定値が使われる。
@@ -109,6 +112,11 @@ fn forward(event: &Result<WebSocketEvent<'_>, esp_idf_svc::io::EspIOError>, send
                 Ok(parsed) => {
                     let _ = sender.send(parsed);
                 }
+                // 受信バッファぎりぎりで切れているなら、まず大きさを疑う。
+                Err(_) if payload.len() >= RECEIVE_BUFFER - 1 => log::warn!(
+                    "電文が受信バッファ({RECEIVE_BUFFER} バイト)に収まりませんでした。\
+                     RECEIVE_BUFFER を大きくしてください"
+                ),
                 // 電文を1つ読み違えても対話は続けられる。
                 Err(error) => log::warn!("電文を解釈できません: {}", error.detail),
             }

@@ -49,3 +49,8 @@ CONFIG_I2C_SKIP_LEGACY_CONFLICT_CHECK=y
 # 31KB まで落ちて WebSocket の受信タスクを作れなくなる。部分更新なので
 # 行数を減らしても見た目は変わらない。
 CONFIG_BSP_LCD_DRAW_BUF_HEIGHT=40
+
+# LVGL の描画バッファを1枚にする。
+# 2枚だと内部 DRAM を余分に使い、SD カードへの書き込みが DMA バッファを
+# 確保できずに落ちる。顔の描画は差分が小さく、1枚でも滑らかに出る。
+CONFIG_BSP_LCD_DRAW_BUF_DOUBLE=n
