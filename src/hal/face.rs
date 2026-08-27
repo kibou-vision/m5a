@@ -48,6 +48,8 @@ pub struct FaceView {
     mouth: *mut bsp::lv_obj_t,
     /// 笑った口。口を開けずに口角だけ上げた線として描く。
     smile: *mut bsp::lv_obj_t,
+    /// てへぺろで出す舌。
+    tongue: *mut bsp::lv_obj_t,
     left_brow: *mut bsp::lv_obj_t,
     right_brow: *mut bsp::lv_obj_t,
     /// 眉の線の座標。LVGL が参照し続けるので、動かない場所に置いておく。
@@ -76,6 +78,7 @@ impl FaceView {
             let right_pupil = make_panel(face);
             let mouth = make_panel(face);
             let smile = make_arc(face, layout::mouth_color(), SMILE_THICKNESS);
+            let tongue = make_panel(face);
             let left_brow = make_line(face);
             let right_brow = make_line(face);
             let button = make_panel(face);
@@ -93,6 +96,8 @@ impl FaceView {
             paint(left_eye, layout::eye_color());
             paint(right_eye, layout::eye_color());
             paint(mouth, layout::mouth_color());
+            round(tongue);
+            paint(tongue, layout::tongue_color());
             for part in [mic_head, mic_stem, mic_base] {
                 paint(part, layout::button_mark_color());
             }
@@ -111,6 +116,7 @@ impl FaceView {
                 right_pupil,
                 mouth,
                 smile,
+                tongue,
                 left_brow,
                 right_brow,
                 brow_points: Box::new([[bsp::lv_point_precise_t { x: 0, y: 0 }; 2]; 2]),
@@ -159,6 +165,7 @@ impl FaceView {
         show_at(self.right_pupil, layout.right_pupil);
 
         self.write_mouth(layout);
+        show_at(self.tongue, layout.tongue);
         self.write_brows(layout);
 
         place(self.button, layout.button);

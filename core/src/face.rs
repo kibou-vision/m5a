@@ -21,6 +21,37 @@ pub const PATIENT_ATTEMPTS: u32 = 5;
 /// 考えているときに視線が左右に往復する周期。
 const GAZE_SWAY_PERIOD_MS: f32 = 1_800.0;
 
+/// 待機中、流し目を保つ長さ。
+const IDLE_GLANCE_HOLD_MS: u64 = 900;
+/// 流し目の最短間隔。
+const IDLE_GLANCE_MIN_INTERVAL_MS: u64 = 4_000;
+/// 流し目の間隔の振れ幅。
+const IDLE_GLANCE_INTERVAL_SPREAD_MS: u64 = 5_000;
+/// 流し目で視線を振る大きさ。
+const IDLE_GLANCE_MAGNITUDE: i8 = 70;
+
+/// 二連続まばたきの1回目と2回目の間隔。
+const DOUBLE_BLINK_GAP_MS: u64 = 220;
+/// 待機中のまばたきが二連続になる確率の分母（1/N の確率で起こる）。
+const DOUBLE_BLINK_CHANCE_DENOM: u32 = 4;
+
+/// てへぺろで舌を出している長さ。
+const TONGUE_DURATION_MS: u64 = 900;
+/// てへぺろの最短間隔。
+const TONGUE_MIN_INTERVAL_MS: u64 = 20_000;
+/// てへぺろの間隔の振れ幅。
+const TONGUE_INTERVAL_SPREAD_MS: u64 = 25_000;
+
+/// 待機中の流し目の向き。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Glance {
+    Center,
+    Left,
+    Right,
+    Up,
+    Down,
+}
+
 /// 顔の基本の表情。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Expression {
@@ -93,6 +124,10 @@ pub struct FaceFrame {
     pub mouth_openness: u8,
     /// 視線の左右。-100 が左、100 が右。
     pub gaze_x: i8,
+    /// 視線の上下。-100 が上、100 が下。
+    pub gaze_y: i8,
+    /// てへぺろで舌を出しているか。
+    pub tongue_out: bool,
 }
 
 /// 時刻を与えると顔のかたちを返す。
@@ -103,7 +138,19 @@ pub struct FaceAnimator {
     voice_level: u8,
     next_blink_at_ms: u64,
     blink_started_at_ms: Option<u64>,
-    /// まばたき間隔を散らすための擬似乱数の種。
+    /// 現在のまばたきの直後に、もう一度まばたきさせるか。
+    queued_makeup_blink: bool,
+    /// 現在のまばたきが、二連続の2回目であるか。
+    /// 2回目のあとにさらに続けて仕込まないための印。
+    in_makeup_blink: bool,
+    /// 待機中の流し目の向きと予定。
+    idle_glance: Glance,
+    next_idle_glance_at_ms: u64,
+    idle_glance_started_at_ms: Option<u64>,
+    /// てへぺろの予定。
+    next_tongue_at_ms: u64,
+    tongue_started_at_ms: Option<u64>,
+    /// まばたき間隔などを散らすための擬似乱数の種。
     seed: u32,
 }
 
@@ -121,6 +168,13 @@ impl FaceAnimator {
             voice_level: 0,
             next_blink_at_ms: BLINK_MIN_INTERVAL_MS,
             blink_started_at_ms: None,
+            queued_makeup_blink: false,
+            in_makeup_blink: false,
+            idle_glance: Glance::Center,
+            next_idle_glance_at_ms: IDLE_GLANCE_MIN_INTERVAL_MS,
+            idle_glance_started_at_ms: None,
+            next_tongue_at_ms: TONGUE_MIN_INTERVAL_MS,
+            tongue_started_at_ms: None,
             seed: 0x5A5A_1234,
         }
     }
@@ -137,12 +191,16 @@ impl FaceAnimator {
     /// その時刻の顔を返す。
     pub fn frame_at(&mut self, now_ms: u64) -> FaceFrame {
         self.advance_blink(now_ms);
+        self.advance_idle_glance(now_ms);
+        self.advance_tongue(now_ms);
 
         FaceFrame {
             expression: self.expression,
             eye_openness: self.eye_openness_at(now_ms),
             mouth_openness: self.mouth_openness(),
             gaze_x: self.gaze_x_at(now_ms),
+            gaze_y: self.gaze_y_at(),
+            tongue_out: self.tongue_started_at_ms.is_some(),
         }
     }
 
@@ -152,10 +210,23 @@ impl FaceAnimator {
                 self.blink_started_at_ms = None;
                 // 観測した時刻ではなく予定時刻を基準にすることで、
                 // 描画間隔が変わってもまばたきの間隔が揺れない。
-                self.next_blink_at_ms = started + BLINK_DURATION_MS + self.pick_blink_interval();
+                if self.queued_makeup_blink {
+                    self.queued_makeup_blink = false;
+                    self.in_makeup_blink = true;
+                    self.next_blink_at_ms = started + BLINK_DURATION_MS + DOUBLE_BLINK_GAP_MS;
+                } else {
+                    self.in_makeup_blink = false;
+                    self.next_blink_at_ms =
+                        started + BLINK_DURATION_MS + self.pick_blink_interval();
+                }
             }
             None if now_ms >= self.next_blink_at_ms => {
                 self.blink_started_at_ms = Some(self.next_blink_at_ms);
+                // 2回目のまばたき自体をさらに二連続にはしない。
+                if !self.in_makeup_blink {
+                    self.queued_makeup_blink =
+                        self.expression == Expression::Idle && self.roll_double_blink();
+                }
             }
             _ => {}
         }
@@ -166,6 +237,76 @@ impl FaceAnimator {
         self.seed = self.seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
         let spread = u64::from(self.seed >> 16) % BLINK_INTERVAL_SPREAD_MS;
         BLINK_MIN_INTERVAL_MS + spread
+    }
+
+    fn roll_double_blink(&mut self) -> bool {
+        self.seed = self.seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        (self.seed >> 24) % DOUBLE_BLINK_CHANCE_DENOM == 0
+    }
+
+    /// 待機中だけ、視線を左右上下へ流してはまた正面へ戻す。
+    fn advance_idle_glance(&mut self, now_ms: u64) {
+        if self.expression != Expression::Idle {
+            self.idle_glance = Glance::Center;
+            self.idle_glance_started_at_ms = None;
+            return;
+        }
+
+        match self.idle_glance_started_at_ms {
+            Some(started) if now_ms >= started + IDLE_GLANCE_HOLD_MS => {
+                self.idle_glance_started_at_ms = None;
+                self.idle_glance = Glance::Center;
+                self.next_idle_glance_at_ms =
+                    started + IDLE_GLANCE_HOLD_MS + self.pick_idle_glance_interval();
+            }
+            None if now_ms >= self.next_idle_glance_at_ms => {
+                self.idle_glance_started_at_ms = Some(now_ms);
+                self.idle_glance = self.pick_glance_direction();
+            }
+            _ => {}
+        }
+    }
+
+    fn pick_idle_glance_interval(&mut self) -> u64 {
+        self.seed = self.seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        let spread = u64::from(self.seed >> 16) % IDLE_GLANCE_INTERVAL_SPREAD_MS;
+        IDLE_GLANCE_MIN_INTERVAL_MS + spread
+    }
+
+    /// 左・右・上・下の4パターンから流し目の向きを選ぶ。
+    fn pick_glance_direction(&mut self) -> Glance {
+        self.seed = self.seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        match (self.seed >> 20) % 4 {
+            0 => Glance::Left,
+            1 => Glance::Right,
+            2 => Glance::Up,
+            _ => Glance::Down,
+        }
+    }
+
+    /// 待機中だけ、ときどき舌を出す（てへぺろ）。
+    fn advance_tongue(&mut self, now_ms: u64) {
+        if self.expression != Expression::Idle {
+            self.tongue_started_at_ms = None;
+            return;
+        }
+
+        match self.tongue_started_at_ms {
+            Some(started) if now_ms >= started + TONGUE_DURATION_MS => {
+                self.tongue_started_at_ms = None;
+                self.next_tongue_at_ms = started + TONGUE_DURATION_MS + self.pick_tongue_interval();
+            }
+            None if now_ms >= self.next_tongue_at_ms => {
+                self.tongue_started_at_ms = Some(now_ms);
+            }
+            _ => {}
+        }
+    }
+
+    fn pick_tongue_interval(&mut self) -> u64 {
+        self.seed = self.seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        let spread = u64::from(self.seed >> 16) % TONGUE_INTERVAL_SPREAD_MS;
+        TONGUE_MIN_INTERVAL_MS + spread
     }
 
     fn eye_openness_at(&self, now_ms: u64) -> u8 {
@@ -191,12 +332,30 @@ impl FaceAnimator {
     }
 
     fn gaze_x_at(&self, now_ms: u64) -> i8 {
-        if self.expression != Expression::Thinking {
+        match self.expression {
+            Expression::Thinking => {
+                let phase = now_ms as f32 / GAZE_SWAY_PERIOD_MS * core::f32::consts::TAU;
+                (phase.sin() * 60.0) as i8
+            }
+            Expression::Idle => match self.idle_glance {
+                Glance::Left => -IDLE_GLANCE_MAGNITUDE,
+                Glance::Right => IDLE_GLANCE_MAGNITUDE,
+                _ => 0,
+            },
+            _ => 0,
+        }
+    }
+
+    fn gaze_y_at(&self) -> i8 {
+        if self.expression != Expression::Idle {
             return 0;
         }
 
-        let phase = now_ms as f32 / GAZE_SWAY_PERIOD_MS * core::f32::consts::TAU;
-        (phase.sin() * 60.0) as i8
+        match self.idle_glance {
+            Glance::Up => -IDLE_GLANCE_MAGNITUDE,
+            Glance::Down => IDLE_GLANCE_MAGNITUDE,
+            _ => 0,
+        }
     }
 }
 
@@ -327,6 +486,105 @@ mod tests {
         let sway: Vec<i8> = (0..2_000).step_by(100).map(|t| animator.frame_at(t).gaze_x).collect();
         assert!(sway.iter().any(|&x| x > 20), "右に振れるはず: {sway:?}");
         assert!(sway.iter().any(|&x| x < -20), "左に振れるはず: {sway:?}");
+    }
+
+    #[test]
+    fn idle_glances_visit_all_four_directions() {
+        let mut animator = FaceAnimator::new();
+        animator.set_expression(Expression::Idle);
+
+        let frames: Vec<(i8, i8)> = (0..120_000)
+            .step_by(50)
+            .map(|t| {
+                let frame = animator.frame_at(t);
+                (frame.gaze_x, frame.gaze_y)
+            })
+            .collect();
+
+        assert!(frames.iter().any(|&(x, _)| x > 0), "右を見るはず: {frames:?}");
+        assert!(frames.iter().any(|&(x, _)| x < 0), "左を見るはず: {frames:?}");
+        assert!(frames.iter().any(|&(_, y)| y > 0), "下を見るはず: {frames:?}");
+        assert!(frames.iter().any(|&(_, y)| y < 0), "上を見るはず: {frames:?}");
+    }
+
+    #[test]
+    fn idle_glances_return_to_centre_between_looks() {
+        let mut animator = FaceAnimator::new();
+        animator.set_expression(Expression::Idle);
+
+        let frames: Vec<(i8, i8)> = (0..120_000)
+            .step_by(50)
+            .map(|t| {
+                let frame = animator.frame_at(t);
+                (frame.gaze_x, frame.gaze_y)
+            })
+            .collect();
+
+        assert!(
+            frames.iter().any(|&(x, y)| x == 0 && y == 0),
+            "見ていないときは正面に戻るはず: {frames:?}"
+        );
+    }
+
+    #[test]
+    fn eyes_do_not_glance_outside_idle() {
+        let mut animator = FaceAnimator::new();
+        animator.set_expression(Expression::Listening);
+
+        for t in (0..120_000).step_by(50) {
+            let frame = animator.frame_at(t);
+            assert_eq!(frame.gaze_y, 0, "Idle以外では上下を見ないはず");
+        }
+    }
+
+    #[test]
+    fn blinks_sometimes_come_in_pairs() {
+        let mut animator = FaceAnimator::new();
+        animator.set_expression(Expression::Idle);
+
+        // 閉じている瞬間どうしの間隔を数え、既定のまばたき間隔より
+        // 明らかに短い組が現れることを確かめる。
+        let mut closed_at = Vec::new();
+        let mut was_closed = false;
+        for now_ms in (0..300_000).step_by(10) {
+            let closed = animator.frame_at(now_ms).eye_openness == 0;
+            if closed && !was_closed {
+                closed_at.push(now_ms);
+            }
+            was_closed = closed;
+        }
+
+        let has_pair = closed_at
+            .windows(2)
+            .any(|pair| pair[1] - pair[0] < BLINK_MIN_INTERVAL_MS / 2);
+
+        assert!(has_pair, "二連続まばたきが一度も起きなかった: {closed_at:?}");
+    }
+
+    #[test]
+    fn tongue_shows_only_while_idle_and_returns() {
+        let mut animator = FaceAnimator::new();
+        animator.set_expression(Expression::Idle);
+
+        let mut saw_tongue = false;
+        let mut saw_tongue_hidden_after = false;
+        for t in (0..200_000).step_by(50) {
+            let out = animator.frame_at(t).tongue_out;
+            if out {
+                saw_tongue = true;
+            } else if saw_tongue {
+                saw_tongue_hidden_after = true;
+            }
+        }
+
+        assert!(saw_tongue, "てへぺろが一度も起きなかった");
+        assert!(saw_tongue_hidden_after, "舌は引っ込むはず");
+
+        let mut talking = FaceAnimator::new();
+        talking.set_expression(Expression::Talking);
+        for t in (0..200_000).step_by(50) {
+            assert!(!talking.frame_at(t).tongue_out, "Idle以外では舌を出さないはず");
+        }
     }
 
     #[test]

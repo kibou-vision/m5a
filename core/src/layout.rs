@@ -12,17 +12,20 @@ pub const SCREEN_HEIGHT: i16 = 240;
 /// 目の中心。
 const LEFT_EYE_CENTER: Point = Point::new(80, 108);
 const RIGHT_EYE_CENTER: Point = Point::new(240, 108);
-const EYE_WIDTH: u16 = 72;
-const EYE_HEIGHT: u16 = 72;
-/// 閉じきっても線として見えるようにする下限。
-const EYE_MIN_HEIGHT: u16 = 4;
+/// 目は幅と高さを常に同じ値にして、真円のまま開き具合で大きさが変わるようにする。
+/// 幅と高さを別々に扱うと、開き具合が低いときに楕円になってしまう。
+const EYE_DIAMETER: u16 = 72;
+/// 閉じきっても目のあった場所が分かるようにする下限。
+const EYE_MIN_SIZE: u16 = 4;
 
 const PUPIL_DIAMETER: u16 = 38;
 /// 瞳を描くのに必要な目の開き具合。
-/// 瞳が目からはみ出さない高さまで開いているときだけ描く。
+/// 瞳が目からはみ出さない大きさまで開いているときだけ描く。
 const PUPIL_VISIBLE_OPENNESS: u8 = 55;
 /// 瞳が左右に動ける幅。
 const GAZE_TRAVEL: i16 = 14;
+/// 瞳が上下に動ける幅。目の外へはみ出さないよう左右より狭くする。
+const GAZE_TRAVEL_Y: i16 = 12;
 
 const MOUTH_CENTER: Point = Point::new(160, 182);
 const MOUTH_WIDTH: u16 = 96;
@@ -36,6 +39,12 @@ const CLOSED_MOUTH_HEIGHT: u16 = 6;
 const SMILE_DIAMETER: u16 = 84;
 /// 弧のどのあたりを見せるか。大きいほど口が深くなる。
 const SMILE_DEPTH: i16 = 22;
+
+/// てへぺろで開ける口の高さ。
+const TEHEPERO_MOUTH_HEIGHT: u16 = 24;
+/// てへぺろで出す舌の大きさ。
+const TONGUE_WIDTH: u16 = 26;
+const TONGUE_HEIGHT: u16 = 20;
 
 /// 眉が目の上に浮く高さ。
 const BROW_LIFT: i16 = 52;
@@ -71,6 +80,7 @@ const EYE_COLOR: Color = Color::new(245, 250, 255);
 const PUPIL_COLOR: Color = Color::new(18, 24, 40);
 const MOUTH_COLOR: Color = Color::new(255, 140, 130);
 const BROW_COLOR: Color = Color::new(230, 220, 210);
+const TONGUE_COLOR: Color = Color::new(235, 110, 120);
 
 const BUTTON_IDLE_COLOR: Color = Color::new(40, 170, 90);
 const BUTTON_ACTIVE_COLOR: Color = Color::new(235, 130, 40);
@@ -181,6 +191,8 @@ pub struct FaceLayout {
     pub left_pupil: Option<Rect>,
     pub right_pupil: Option<Rect>,
     pub mouth: Mouth,
+    /// てへぺろのときだけ出す舌。
+    pub tongue: Option<Rect>,
     /// 困り顔のときだけ眉を出す。
     pub brows: Option<(Brow, Brow)>,
     pub button: Rect,
@@ -198,9 +210,11 @@ impl FaceLayout {
 
 /// 顔ひとコマ分の配置を決める。
 pub fn lay_out_face(frame: &FaceFrame) -> FaceLayout {
-    let eye_height = (EYE_HEIGHT * u16::from(frame.eye_openness) / 100).max(EYE_MIN_HEIGHT);
+    // 幅と高さを同じ比率で縮めることで、開き具合によらず目を真円に保つ。
+    let eye_size = (EYE_DIAMETER * u16::from(frame.eye_openness) / 100).max(EYE_MIN_SIZE);
     let shows_pupil = frame.eye_openness >= PUPIL_VISIBLE_OPENNESS;
-    let gaze = i16::from(frame.gaze_x) * GAZE_TRAVEL / 100;
+    let gaze_x = i16::from(frame.gaze_x) * GAZE_TRAVEL / 100;
+    let gaze_y = i16::from(frame.gaze_y) * GAZE_TRAVEL_Y / 100;
 
     FaceLayout {
         background: background_of(frame.expression),
@@ -211,11 +225,12 @@ pub fn lay_out_face(frame: &FaceFrame) -> FaceLayout {
                 SPINNER_DIAMETER,
             )
         }),
-        left_eye: Rect::around(LEFT_EYE_CENTER, EYE_WIDTH, eye_height),
-        right_eye: Rect::around(RIGHT_EYE_CENTER, EYE_WIDTH, eye_height),
-        left_pupil: lay_out_pupil(LEFT_EYE_CENTER, gaze, shows_pupil),
-        right_pupil: lay_out_pupil(RIGHT_EYE_CENTER, gaze, shows_pupil),
+        left_eye: Rect::around(LEFT_EYE_CENTER, eye_size, eye_size),
+        right_eye: Rect::around(RIGHT_EYE_CENTER, eye_size, eye_size),
+        left_pupil: lay_out_pupil(LEFT_EYE_CENTER, gaze_x, gaze_y, shows_pupil),
+        right_pupil: lay_out_pupil(RIGHT_EYE_CENTER, gaze_x, gaze_y, shows_pupil),
         mouth: lay_out_mouth(frame),
+        tongue: lay_out_tongue(frame),
         brows: lay_out_brows(frame.expression),
         button: Rect::around(
             TALK_BUTTON_CENTER,
@@ -292,6 +307,11 @@ pub fn brow_color() -> Color {
     BROW_COLOR
 }
 
+/// 舌の色。
+pub fn tongue_color() -> Color {
+    TONGUE_COLOR
+}
+
 /// ボタン中央のしるしの色。
 pub fn button_mark_color() -> Color {
     BUTTON_MARK_COLOR
@@ -313,16 +333,21 @@ fn button_color_of(expression: Expression) -> Color {
     }
 }
 
-fn lay_out_pupil(eye_center: Point, gaze: i16, shows_pupil: bool) -> Option<Rect> {
+fn lay_out_pupil(eye_center: Point, gaze_x: i16, gaze_y: i16, shows_pupil: bool) -> Option<Rect> {
     if !shows_pupil {
         return None;
     }
 
-    let center = Point::new(eye_center.x + gaze, eye_center.y);
+    let center = Point::new(eye_center.x + gaze_x, eye_center.y + gaze_y);
     Some(Rect::around(center, PUPIL_DIAMETER, PUPIL_DIAMETER))
 }
 
 fn lay_out_mouth(frame: &FaceFrame) -> Mouth {
+    // てへぺろのときは、待機中のふつうの笑顔ではなく口を開けて舌を見せる。
+    if frame.expression == Expression::Idle && frame.tongue_out {
+        return Mouth::Open(Rect::around(MOUTH_CENTER, MOUTH_WIDTH, TEHEPERO_MOUTH_HEIGHT));
+    }
+
     match frame.expression {
         Expression::Talking => {
             let height = (MOUTH_MAX_HEIGHT * u16::from(frame.mouth_openness) / 100)
@@ -344,6 +369,17 @@ fn lay_out_mouth(frame: &FaceFrame) -> Mouth {
             CLOSED_MOUTH_HEIGHT,
         )),
     }
+}
+
+/// てへぺろで覗かせる舌。口の下端のすぐ下に置く。
+fn lay_out_tongue(frame: &FaceFrame) -> Option<Rect> {
+    (frame.expression == Expression::Idle && frame.tongue_out).then(|| {
+        let center = Point::new(
+            MOUTH_CENTER.x,
+            MOUTH_CENTER.y + TEHEPERO_MOUTH_HEIGHT as i16 / 2,
+        );
+        Rect::around(center, TONGUE_WIDTH, TONGUE_HEIGHT)
+    })
 }
 
 /// 困り眉。外側が下がり内側が上がる「ハの字」にする。
@@ -378,6 +414,8 @@ mod tests {
             eye_openness,
             mouth_openness: 0,
             gaze_x: 0,
+            gaze_y: 0,
+            tongue_out: false,
         }
     }
 
@@ -391,12 +429,33 @@ mod tests {
     }
 
     #[test]
-    fn closed_eyes_hide_pupils_but_keep_a_line() {
+    fn closed_eyes_hide_pupils_but_keep_a_mark() {
         let layout = lay_out_face(&frame(Expression::Idle, 0));
 
         assert!(layout.left_pupil.is_none());
         assert!(layout.right_pupil.is_none());
-        assert_eq!(layout.left_eye.height, EYE_MIN_HEIGHT);
+        assert_eq!(layout.left_eye.height, EYE_MIN_SIZE);
+    }
+
+    #[test]
+    fn eyes_are_always_perfect_circles() {
+        for expression in [
+            Expression::Waiting,
+            Expression::Idle,
+            Expression::Listening,
+            Expression::Thinking,
+            Expression::Talking,
+            Expression::Trouble,
+        ] {
+            for openness in [0, 30, 55, 80, 100] {
+                let layout = lay_out_face(&frame(expression, openness));
+                assert_eq!(
+                    layout.left_eye.width, layout.left_eye.height,
+                    "{expression:?} openness={openness} で目が楕円になった"
+                );
+                assert_eq!(layout.right_eye.width, layout.right_eye.height);
+            }
+        }
     }
 
     #[test]
@@ -431,6 +490,43 @@ mod tests {
             right.x + right.width as i16 / 2,
             RIGHT_EYE_CENTER.x + GAZE_TRAVEL
         );
+    }
+
+    #[test]
+    fn gaze_y_moves_both_pupils_the_same_way() {
+        let looking_down = FaceFrame {
+            gaze_y: 100,
+            ..frame(Expression::Idle, 100)
+        };
+
+        let layout = lay_out_face(&looking_down);
+
+        let left = layout.left_pupil.unwrap();
+        let right = layout.right_pupil.unwrap();
+        assert_eq!(left.y + left.height as i16 / 2, LEFT_EYE_CENTER.y + GAZE_TRAVEL_Y);
+        assert_eq!(
+            right.y + right.height as i16 / 2,
+            RIGHT_EYE_CENTER.y + GAZE_TRAVEL_Y
+        );
+    }
+
+    #[test]
+    fn tongue_appears_only_while_idle_and_out() {
+        let tehepero = lay_out_face(&FaceFrame {
+            tongue_out: true,
+            ..frame(Expression::Idle, 100)
+        });
+        assert!(tehepero.tongue.is_some());
+        assert!(matches!(tehepero.mouth, Mouth::Open(_)));
+
+        let not_out = lay_out_face(&frame(Expression::Idle, 100));
+        assert!(not_out.tongue.is_none());
+
+        let wrong_expression = lay_out_face(&FaceFrame {
+            tongue_out: true,
+            ..frame(Expression::Listening, 100)
+        });
+        assert!(wrong_expression.tongue.is_none());
     }
 
     #[test]
@@ -587,7 +683,7 @@ mod tests {
     #[test]
     fn pupils_stay_inside_the_eyes() {
         // 瞳が目より高いと、はみ出して見える。
-        let smallest_eye = EYE_HEIGHT * u16::from(PUPIL_VISIBLE_OPENNESS) / 100;
+        let smallest_eye = EYE_DIAMETER * u16::from(PUPIL_VISIBLE_OPENNESS) / 100;
         assert!(
             PUPIL_DIAMETER <= smallest_eye,
             "瞳 {PUPIL_DIAMETER} が目の高さ {smallest_eye} を超えている"
@@ -678,6 +774,8 @@ mod tests {
             let layout = lay_out_face(&FaceFrame {
                 mouth_openness: 100,
                 gaze_x: 100,
+                gaze_y: 100,
+                tongue_out: true,
                 ..frame(expression, 100)
             });
 
@@ -692,6 +790,7 @@ mod tests {
             boxes.extend(layout.spinner);
             boxes.extend(layout.left_pupil);
             boxes.extend(layout.right_pupil);
+            boxes.extend(layout.tongue);
 
             for area in boxes {
                 assert!(
