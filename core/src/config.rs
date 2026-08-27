@@ -33,53 +33,49 @@ const SUPPORTED_VOICES: [&str; 10] = [
 ];
 
 /// 親が編集する設定ファイルの雛形。
-pub const CONFIG_TEMPLATE: &str = r#"# m5a せってい ファイル
-#
-# このファイルを テキストエディタ で ひらいて、
-# "" の なかを かきかえて ほぞんしてください。
-# かきかえたら SDカード を M5Stack に もどして でんげん を いれます。
+pub const CONFIG_TEMPLATE: &str = r#"# m5a 設定ファイル
+# "" の 中を変更して保存してください。
+# 変更後、SDカードを M5Stack に戻して電源を入れます。
 
 [child]
-# こどもの なまえ。アシスタントが この なまえ で よびかけます。
-name = "なまえをここに"
-# ねんれい。はなしかたの むずかしさ の めやす に つかいます。
+# 利用者の名前。アシスタントがこの名前で呼びかけます。
+name = ""
+# 年齢。話し方の難しさの目安に使います。
 age = 5
 
 [assistant]
-# アシスタント じしん の なまえ。きかれたら この なまえ で こたえます。
+# アシスタント自身の名前。呼ばれたらこの名前で応えます。
 name = "アシスタント"
 
 [wifi]
-# つなぐ WiFi の なまえ (SSID) と パスワード。
-# 5GHz の WiFi は つかえません。2.4GHz を えらんでください。
-ssid = "WiFiのSSIDをここに"
-password = "WiFiのパスワードをここに"
+# 接続する WiFi の名前 (SSID) とパスワード。
+# 5GHz の WiFi は使えません。2.4GHz を選んでください。
+ssid = ""
+password = ""
 
 [openai]
-# OpenAI の APIキー。https://platform.openai.com/api-keys で つくれます。
-# このキーは りょうきん が かかります。
-# せんよう の プロジェクト を つくり、つかいすぎ の じょうげん を
-# せっていしておくことを おすすめします。
-api_key = "sk-ここにAPIキーを"
+# OpenAI の APIキー。https://platform.openai.com/api-keys で 作成できます。
+# このキーは料金がかかります。
+# 専用のプロジェクトを作成し、上限を設定することを推奨します。
+api_key = ""
 
-# つかう モデル。ふつうは かえなくて だいじょうぶです。
+# 使用するモデル
 model = "gpt-realtime-2.1-mini"
 
-# こえ の しゅるい。
+# 声の種類。
 # alloy / ash / ballad / coral / echo / sage / shimmer / verse / marin / cedar
 voice = "marin"
 
-# おとの けいしき。
-#   ulaw  = でんわ の おとしつ。つうしんりょう が すくなく、あんてい します。
-#   pcm16 = たかい おとしつ。つうしん が おもく、とぎれる ことが あります。
+# 音声の形式。
+#   ulaw  = 低い音質。通信量が少なく、安定します。
+#   pcm16 = 高い音質。通信が重く、とぎれることがあります。
 audio_format = "ulaw"
 
 [search]
-# アシスタントが しらないこと を インターネットで しらべられる ように する
-# ための せってい。かかなければ、しらべる きのう は つかいません。
+# アシスタントが分からないことをインターネットで調べられるようにする
+# ための設定。無効にすれば、調べる機能は使えません。
 #
-# Tavily (https://www.tavily.com/) で むりょう の アカウントを つくると
-# APIキー が もらえます。
+# Tavily (https://www.tavily.com/) で無料のアカウントを作成できます
 api_key = ""
 "#;
 
@@ -386,12 +382,15 @@ mod tests {
     use crate::ports::mock::MemoryStorage;
 
     /// 記入済みの設定として通る最小の内容。
+    ///
+    /// テンプレートの空欄はどれも `""` で見分けが付かないため、
+    /// 各項目の鍵ごと1件だけ埋める。
     fn filled_source() -> String {
         CONFIG_TEMPLATE
-            .replace(NAME_EXAMPLE, "はると")
-            .replace(SSID_EXAMPLE, "home-wifi")
-            .replace(PASSWORD_EXAMPLE, "pass1234")
-            .replace(API_KEY_EXAMPLE, "sk-proj-abcdef")
+            .replacen("name = \"\"", "name = \"はると\"", 1)
+            .replacen("ssid = \"\"", "ssid = \"home-wifi\"", 1)
+            .replacen("password = \"\"", "password = \"pass1234\"", 1)
+            .replacen("api_key = \"\"", "api_key = \"sk-proj-abcdef\"", 1)
     }
 
     #[test]
@@ -458,8 +457,8 @@ mod tests {
     fn assistant_name_defaults_when_absent() {
         let source = filled_source().replace(
             "[assistant]\n\
-             # アシスタント じしん の なまえ。きかれたら この なまえ で こたえます。\n\
-             name = \"アシスタント\"\n",
+             # アシスタント自身の名前。呼ばれたらこの名前で応えます。\n\
+             name = \"アシスタント\"\n\n",
             "",
         );
 
@@ -534,11 +533,10 @@ mod tests {
     fn search_section_can_be_omitted_entirely() {
         let source = filled_source().replace(
             "[search]\n\
-             # アシスタントが しらないこと を インターネットで しらべられる ように する\n\
-             # ための せってい。かかなければ、しらべる きのう は つかいません。\n\
+             # アシスタントが分からないことをインターネットで調べられるようにする\n\
+             # ための設定。無効にすれば、調べる機能は使えません。\n\
              #\n\
-             # Tavily (https://www.tavily.com/) で むりょう の アカウントを つくると\n\
-             # APIキー が もらえます。\n\
+             # Tavily (https://www.tavily.com/) で無料のアカウントを作成できます\n\
              api_key = \"\"\n",
             "",
         );

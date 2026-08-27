@@ -80,7 +80,7 @@ fn read_settings() -> Result<Config, ConfigError> {
 fn report_settings(settings: &Result<Config, ConfigError>) {
     match settings {
         Ok(config) => log::info!(
-            "せっていを よみました: なまえ={} アシスタント名={} モデル={} こえ={}",
+            "設定を読み込みました: 名前={} アシスタント名={} モデル={} 声={}",
             config.child.name,
             config.assistant.name,
             config.openai.model,
@@ -191,7 +191,7 @@ impl Runtime {
             // まだキューに残っている分の音より先に口が閉じてしまう。
             AppAction::StopPlayback => None,
             AppAction::ShowSetupGuide => {
-                log::warn!("せっていを かきこんで ください");
+                log::warn!("設定を書き込んでください");
                 None
             }
             AppAction::ShowFailure(failure) => {
@@ -238,7 +238,7 @@ impl Runtime {
         }
 
         log::info!(
-            "WiFi に つながりました: {}",
+            "WiFi に繋がりました: {}",
             wifi::describe_address(self.wifi.as_ref()?)
         );
         // 時刻合わせは一度だけでよい。
@@ -463,7 +463,7 @@ impl Runtime {
         };
 
         let reply = guardrail.safe_reply(concern);
-        log::warn!("気になる はなし: {concern:?}");
+        log::warn!("気になる話: {concern:?}");
 
         if concern.should_notify_parent() {
             self.record(Speaker::System, format!("気になる発言がありました: {text}"));
@@ -475,18 +475,18 @@ impl Runtime {
     /// その場で「わからない」を返す。
     fn handle_tool_call(&mut self, call_id: &str, name: &str, arguments: &str) {
         if name != search::TOOL_NAME {
-            self.finish_tool_call(call_id, "それは できません");
+            self.finish_tool_call(call_id, "それはできません");
             return;
         }
 
         let Some(api_key) = self.config.as_ref().and_then(|config| config.search.api_key())
         else {
-            self.finish_tool_call(call_id, "いまは しらべられません");
+            self.finish_tool_call(call_id, "今は調べられません");
             return;
         };
 
         let Some(query) = search::extract_query(arguments) else {
-            self.finish_tool_call(call_id, "なにを しらべるか わかりませんでした");
+            self.finish_tool_call(call_id, "何を調べるか分かりませんでした");
             return;
         };
 

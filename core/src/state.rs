@@ -43,9 +43,9 @@ impl Failure {
     /// 何が起きたかを親に示す文。
     pub fn describe(self) -> &'static str {
         match self {
-            Self::Network => "WiFiに つながりません",
-            Self::Session => "おはなしの じゅんびが できません",
-            Self::Storage => "SDカードを よめません",
+            Self::Network => "WiFiに繋がりません",
+            Self::Session => "対話の準備ができません",
+            Self::Storage => "SDカードを読めません",
         }
     }
 

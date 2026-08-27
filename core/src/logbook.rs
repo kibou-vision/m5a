@@ -1,6 +1,6 @@
 //! 会話の文字起こしを SD カードに残す。
 //!
-//! 親があとで読み返せるよう日付ごとのファイルに追記する。音声そのものは残さない。
+//! 開発者があとで読み返せるよう日付ごとのファイルに追記する。音声そのものは残さない。
 
 use crate::config::LOG_DIR;
 use crate::ports::{Storage, StorageError};
@@ -20,9 +20,9 @@ pub enum Speaker {
 impl Speaker {
     fn label(self) -> &'static str {
         match self {
-            Self::Child => "こども",
-            Self::Assistant => "アシスタント",
-            Self::System => "きろく",
+            Self::Child => "user",
+            Self::Assistant => "assistant",
+            Self::System => "system",
         }
     }
 }
@@ -140,14 +140,14 @@ mod tests {
     fn formats_a_line_with_time_and_speaker() {
         let entry = LogEntry::new(SAMPLE_TIME, Speaker::Assistant, "こんにちは はると");
 
-        assert_eq!(entry.format(), "09:05:03 [アシスタント] こんにちは はると\n");
+        assert_eq!(entry.format(), "09:05:03 [assistant] こんにちは はると\n");
     }
 
     #[test]
     fn folds_multiline_speech_into_one_line() {
         let entry = LogEntry::new(SAMPLE_TIME, Speaker::Child, "あのね\nきょう ね\r\nあそんだ");
 
-        assert_eq!(entry.format(), "09:05:03 [こども] あのね きょう ね  あそんだ\n");
+        assert_eq!(entry.format(), "09:05:03 [user] あのね きょう ね  あそんだ\n");
     }
 
     #[test]
