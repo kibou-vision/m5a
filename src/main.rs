@@ -326,20 +326,22 @@ impl Runtime {
 
     /// 録音を送り出す。溜まっている分をまとめて流す。
     ///
-    /// 声を一度も検出していない間は、待ち行列に溜めたまま送らない。
-    /// 声が来るまでの沈黙をサーバーへ送らずに済ませるため。
-    /// 待ち行列自体は短いため、溜め続けても直近の分だけが残る。
+    /// 声を検出したかにかかわらず、待ち行列は毎回空にする。空けずに残すと
+    /// 録音の仕事側の待ち行列が満杯のまま数秒続き、そちら側の送信待ちが
+    /// 詰まってタスクウォッチドッグに落ちたことがある。声を一度も
+    /// 検出していない間は、取り出した分をサーバーへは送らず捨てるだけにする。
     fn push_captured(&mut self) {
         let Some(audio) = self.audio.as_ref() else {
             return;
         };
-        if !self.turn.as_ref().is_some_and(TurnDetector::has_spoken) {
-            return;
-        }
 
         let mut pending = Vec::new();
         while let Some(chunk) = audio.take_captured() {
             pending.push(chunk);
+        }
+
+        if !self.turn.as_ref().is_some_and(TurnDetector::has_spoken) {
+            return;
         }
 
         for chunk in pending {
