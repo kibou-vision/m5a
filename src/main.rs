@@ -18,6 +18,7 @@ use m5a_core::ports::StorageError;
 use m5a_core::realtime::{self, ServerEvent, SessionSetup};
 use m5a_core::search;
 use m5a_core::state::{transition, AppAction, AppEvent, AppState, Failure};
+use m5a_core::turn_detector::{TurnDetector, TurnOutcome};
 
 use hal::audio::Audio;
 use hal::board::{self, DisplayLock};
@@ -115,6 +116,8 @@ struct Runtime {
     /// サーバーからは応答終了の知らせが届いたが、まだ再生しきっていない分がある。
     /// 実際に鳴らし終わってから状態遷移のきっかけを起こす。
     finishing_response: bool,
+    /// 録音中だけ持つ、声と沈黙の追跡。`Listening` の間だけ `Some`。
+    turn: Option<TurnDetector>,
 }
 
 impl Runtime {
@@ -137,6 +140,7 @@ impl Runtime {
             storage: SdStorage::new(),
             pending_search: None,
             finishing_response: false,
+            turn: None,
         }
     }
 
@@ -162,14 +166,18 @@ impl Runtime {
             }
             AppAction::StartCapture => {
                 if let Some(audio) = self.audio.as_ref() {
+                    // 前回の録音の残りが新しい発話の頭に混ざらないようにする。
+                    audio.discard_captured();
                     audio.begin_capture();
                 }
+                self.turn = Some(TurnDetector::new());
                 None
             }
             AppAction::StopCapture => {
                 if let Some(audio) = self.audio.as_ref() {
                     audio.end_capture();
                 }
+                self.turn = None;
                 None
             }
             AppAction::RequestResponse => {
@@ -317,10 +325,17 @@ impl Runtime {
     }
 
     /// 録音を送り出す。溜まっている分をまとめて流す。
+    ///
+    /// 声を一度も検出していない間は、待ち行列に溜めたまま送らない。
+    /// 声が来るまでの沈黙をサーバーへ送らずに済ませるため。
+    /// 待ち行列自体は短いため、溜め続けても直近の分だけが残る。
     fn push_captured(&mut self) {
         let Some(audio) = self.audio.as_ref() else {
             return;
         };
+        if !self.turn.as_ref().is_some_and(TurnDetector::has_spoken) {
+            return;
+        }
 
         let mut pending = Vec::new();
         while let Some(chunk) = audio.take_captured() {
@@ -335,6 +350,17 @@ impl Runtime {
     /// いま鳴っている音の大きさ。口の開きに使う。
     fn voice_level(&self) -> u8 {
         self.audio.as_ref().map_or(0, Audio::level)
+    }
+
+    /// 録音中の沈黙を追跡し、話し終わり（または声が無いまま）を判定する。
+    fn poll_turn(&mut self, elapsed_ms: u32) -> Option<AppEvent> {
+        let level = self.audio.as_ref().map_or(0, Audio::input_level);
+        let outcome = self.turn.as_mut()?.observe(level, elapsed_ms)?;
+
+        Some(match outcome {
+            TurnOutcome::SpeechEnded => AppEvent::SpeechEnded,
+            TurnOutcome::NothingSaid => AppEvent::SpeechNotDetected,
+        })
     }
 
     /// 応答終了の知らせを待たせていたら、実際に鳴らし終わったか確かめる。
@@ -544,6 +570,7 @@ fn run(modem: Modem<'static>, settings: Result<Config, ConfigError>) -> Result<(
     // 立ち上げ中の失敗を数える。数回は読み込み中として見せ、
     // それでも駄目なときだけ困り顔で親に伝える。
     let mut failed_attempts = 0_u32;
+    let mut last_now_ms = uptime_ms();
 
     runtime.open_audio();
     advance(&mut state, &mut runtime, startup);
@@ -551,6 +578,8 @@ fn run(modem: Modem<'static>, settings: Result<Config, ConfigError>) -> Result<(
 
     loop {
         let now_ms = uptime_ms();
+        let elapsed_ms = (now_ms - last_now_ms) as u32;
+        last_now_ms = now_ms;
 
         if let Some(change) = touch.poll() {
             if let Some(event) = to_event(change) {
@@ -565,6 +594,9 @@ fn run(modem: Modem<'static>, settings: Result<Config, ConfigError>) -> Result<(
             advance(&mut state, &mut runtime, event);
         }
         if let Some(event) = runtime.poll_playback() {
+            advance(&mut state, &mut runtime, event);
+        }
+        if let Some(event) = runtime.poll_turn(elapsed_ms) {
             advance(&mut state, &mut runtime, event);
         }
 

@@ -1,7 +1,9 @@
 //! アプリ全体の状態遷移。
 //!
-//! 押している間だけ録音する方式のため、ボタンの押下と解放が
-//! そのまま録音の開始と送信に対応する。
+//! ボタンは押した瞬間に録音を始めるきっかけにすぎず、押し続ける必要はない。
+//! 実際にいつ録音を終えて送るかは端末側の
+//! [`crate::turn_detector::TurnDetector`] が声と沈黙から決め、
+//! `SpeechEnded` / `SpeechNotDetected` として届く。
 
 /// 画面と音声のふるまいを決める状態。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -76,6 +78,10 @@ pub enum AppEvent {
     TalkPressed,
     /// ボタンが離された。
     TalkReleased,
+    /// 声のあとに沈黙が区切りの長さまで続き、話し終わったとみなせる。
+    SpeechEnded,
+    /// 声が一度も無いまま沈黙が区切りの長さまで続いた。
+    SpeechNotDetected,
     /// 応答音声が届き始めた。
     ResponseStarted,
     /// 応答が終わった。
@@ -186,10 +192,17 @@ pub fn transition(current: &AppState, event: AppEvent) -> Transition {
             vec![AppAction::CancelResponse, AppAction::StartCapture],
         ),
 
-        (AppState::Listening, AppEvent::TalkReleased) => Transition::to(
+        // 声のあとの沈黙が区切りに達したら、録音を止めて応答を求める。
+        // ボタンを離すタイミングは見ない。押し続ける必要が無いため。
+        (AppState::Listening, AppEvent::SpeechEnded) => Transition::to(
             AppState::Thinking,
             vec![AppAction::StopCapture, AppAction::RequestResponse],
         ),
+
+        // 声が一度も無いまま沈黙が続いたら、何も送らず静かに待機へ戻る。
+        (AppState::Listening, AppEvent::SpeechNotDetected) => {
+            Transition::to(AppState::Ready, vec![AppAction::StopCapture])
+        }
 
         (AppState::Thinking, AppEvent::ResponseStarted) => {
             Transition::to(AppState::Speaking, vec![AppAction::StartPlayback])
@@ -271,7 +284,7 @@ mod tests {
             AppState::Ready,
             &[
                 AppEvent::TalkPressed,
-                AppEvent::TalkReleased,
+                AppEvent::SpeechEnded,
                 AppEvent::ResponseStarted,
                 AppEvent::ResponseFinished,
             ],
@@ -288,6 +301,22 @@ mod tests {
                 AppAction::StopPlayback,
             ]
         );
+    }
+
+    #[test]
+    fn silence_without_any_speech_returns_to_ready_quietly() {
+        let step = transition(&AppState::Listening, AppEvent::SpeechNotDetected);
+
+        assert_eq!(step.next, AppState::Ready);
+        assert_eq!(step.actions, vec![AppAction::StopCapture]);
+    }
+
+    #[test]
+    fn releasing_the_button_no_longer_ends_the_turn() {
+        let step = transition(&AppState::Listening, AppEvent::TalkReleased);
+
+        assert_eq!(step.next, AppState::Listening);
+        assert!(step.actions.is_empty());
     }
 
     #[test]

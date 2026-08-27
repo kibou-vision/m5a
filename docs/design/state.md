@@ -16,7 +16,8 @@ stateDiagram-v2
   Opening --> Ready : SessionOpened
 
   Ready --> Listening : TalkPressed<br/>／録音開始
-  Listening --> Thinking : TalkReleased<br/>／録音停止・応答要求
+  Listening --> Thinking : SpeechEnded<br/>／録音停止・応答要求
+  Listening --> Ready : SpeechNotDetected<br/>／何も送らず録音停止
   Thinking --> Speaking : ResponseStarted<br/>／再生開始
   Thinking --> Ready : ResponseFinished<br/>（音声なしで終了）
   Speaking --> Ready : ResponseFinished<br/>／再生停止
@@ -37,6 +38,12 @@ stateDiagram-v2
 ```
 
 ## 設計上の判断
+
+**ボタンは押すだけで、押し続けなくてよい** — 録音の終わりはボタンの解放
+ではなく、`core::turn_detector::TurnDetector` が実際の声と沈黙から決める。
+声のあとに沈黙が3秒続けば `SpeechEnded`、声が一度も無いまま沈黙が続けば
+`SpeechNotDetected` になり、どちらも `TalkReleased` は見ない
+（[音声対話](../spec/conversation.md)参照）。
 
 **応答中の割り込みを許す** — 子どもは相手の話し終わりを待たない。
 `Speaking` や `Thinking` の最中にボタンを押されたら、生成中の応答を

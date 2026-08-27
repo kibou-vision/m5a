@@ -74,6 +74,8 @@ pub struct Audio {
     /// 再生を待っている音声。
     to_play: SyncSender<Vec<u8>>,
     capturing: Arc<AtomicBool>,
+    /// いま拾っているマイクの音の大きさ。声の区切りの判定に使う。
+    input_level: Arc<AtomicU8>,
     /// いま鳴っている音の大きさ。口の開きに使う。
     level: Arc<AtomicU8>,
     /// 実際に応答の音声を鳴らしている最中かどうか。
@@ -106,8 +108,15 @@ impl Audio {
         set_gain(&microphone, MICROPHONE_GAIN_DB);
 
         let capturing = Arc::new(AtomicBool::new(false));
+        let input_level = Arc::new(AtomicU8::new(0));
         let (captured_tx, captured) = sync_channel(CAPTURE_QUEUE_DEPTH);
-        spawn_capture(microphone, format, capturing.clone(), captured_tx)?;
+        spawn_capture(
+            microphone,
+            format,
+            capturing.clone(),
+            input_level.clone(),
+            captured_tx,
+        )?;
 
         // 読み取りが始まってクロックが安定するのを待つ。
         thread::sleep(CLOCK_SETTLE);
@@ -129,6 +138,7 @@ impl Audio {
             captured,
             to_play,
             capturing,
+            input_level,
             level,
             speaking,
             dropped: Arc::new(AtomicUsize::new(0)),
@@ -149,6 +159,17 @@ impl Audio {
     /// 送るべき録音を1つ取り出す。
     pub fn take_captured(&self) -> Option<Vec<u8>> {
         self.captured.try_recv().ok()
+    }
+
+    /// 前の録音の残りを捨てる。新しく録音を始める前に呼び、
+    /// 前回の音が新しい発話の頭に混ざらないようにする。
+    pub fn discard_captured(&self) {
+        while self.captured.try_recv().is_ok() {}
+    }
+
+    /// いまマイクが拾っている音の大きさ。声の区切りの判定に使う。
+    pub fn input_level(&self) -> u8 {
+        self.input_level.load(Ordering::Relaxed)
     }
 
     /// 応答の音声を鳴らす。追いつかないときは捨てて遅れを溜めない。
@@ -255,6 +276,7 @@ fn spawn_capture(
     microphone: Codec,
     format: AudioFormat,
     capturing: Arc<AtomicBool>,
+    input_level: Arc<AtomicU8>,
     captured: SyncSender<Vec<u8>>,
 ) -> Result<()> {
     thread::Builder::new()
@@ -275,7 +297,12 @@ fn spawn_capture(
                 }
 
                 // 録音していない間も読み続ける。止めると I2S のクロックが途切れる。
-                if !capturing.load(Ordering::Relaxed) {
+                let is_capturing = capturing.load(Ordering::Relaxed);
+                input_level.store(
+                    if is_capturing { waveform::measure_level(&samples) } else { 0 },
+                    Ordering::Relaxed,
+                );
+                if !is_capturing {
                     continue;
                 }
 

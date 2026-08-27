@@ -46,23 +46,35 @@ sequenceDiagram
   participant HalSearch as hal::search
   participant Tavily as Tavily
 
-  Child->>Touch: ボタンを押す
+  Child->>Touch: 画面を押す
   Touch->>Main: Pressed
   Main->>State: TalkPressed
   State-->>Main: Listening ＋ StartCapture
+  Note over Main: 声を検出するまでは録音してもサーバへ送らない
 
-  loop 押している間
+  loop 声を検出するまで
+    Main->>Audio: input_level() で無音か調べる
+    Main->>Main: TurnDetector::observe()
+  end
+
+  Note over Main: 実際に声が聞こえた
+  loop 声のあとの無音が3秒続くまで
     Main->>Audio: encode_ulaw_block(録音)
     Main->>Proto: build_audio_append()
     Proto->>API: input_audio_buffer.append
+    Main->>Main: TurnDetector::observe()
   end
 
-  Child->>Touch: ボタンを離す
-  Touch->>Main: Released
-  Main->>State: TalkReleased
-  State-->>Main: Thinking ＋ StopCapture, RequestResponse
-  Main->>Proto: build_audio_commit() / build_response_create()
-  Proto->>API: commit ＋ response.create
+  alt 声のあとに無音が3秒続いた
+    Main->>State: SpeechEnded
+    State-->>Main: Thinking ＋ StopCapture, RequestResponse
+    Main->>Proto: build_audio_commit() / build_response_create()
+    Proto->>API: commit ＋ response.create
+  else 声が一度も聞こえないまま無音が3秒続いた
+    Main->>State: SpeechNotDetected
+    State-->>Main: Ready ＋ StopCapture
+    Note over Main: 何も送らず終える
+  end
 
   API-->>Proto: input_audio_transcription.completed
   Proto-->>Main: ChildSaid

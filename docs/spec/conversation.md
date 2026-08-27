@@ -9,13 +9,16 @@
 
 ## 話す順番の決め方
 
-押している間だけ録音する方式のため、サーバ側の発話区切り検出は使わない。
+サーバ側の発話区切り検出は使わず、端末側で声と沈黙から区切りを決める
+（`core::turn_detector::TurnDetector`、[状態遷移](../design/state.md)参照）。
 `session.audio.input.turn_detection` を `null` にして、次の順で自分から送る。
 
-1. ボタン押下 → 録音開始
-2. 録音中 → `input_audio_buffer.append`（base64）
-3. ボタン解放 → `input_audio_buffer.commit` → `response.create`
-4. 応答中にボタン押下 → `response.cancel` して録音に戻る
+1. ボタン押下 → 録音開始。押し続ける必要はない
+2. 実際に声が聞こえるまでは、録音してもサーバへは送らない
+3. 声が聞こえたら、以後の録音を順に `input_audio_buffer.append`（base64）で送る
+4. 声のあとの無音が3秒続いたら → `input_audio_buffer.commit` → `response.create`
+5. 声が一度も聞こえないまま無音が3秒続いたら → 何も送らず録音を終える
+6. 応答中にボタン押下 → `response.cancel` して録音に戻る
 
 ## 音声の形式
 
