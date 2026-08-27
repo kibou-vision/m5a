@@ -73,13 +73,15 @@ const SELF_HARM_TERMS: [&str; 5] = ["しにたい", "きえたい", "じさつ",
 pub struct Guardrail {
     child_name: String,
     child_age: u8,
+    assistant_name: String,
 }
 
 impl Guardrail {
-    pub fn new(child_name: &str, child_age: u8) -> Self {
+    pub fn new(child_name: &str, child_age: u8, assistant_name: &str) -> Self {
         Self {
             child_name: child_name.to_string(),
             child_age,
+            assistant_name: assistant_name.to_string(),
         }
     }
 
@@ -102,9 +104,11 @@ impl Guardrail {
     pub fn build_instructions(&self) -> String {
         let name = &self.child_name;
         let age = self.child_age;
+        let assistant_name = &self.assistant_name;
 
         format!(
-            "あなたは{age}才の'{name}'さんの優しい友達です。\n\
+            "あなたの名前は「{assistant_name}」です。{age}才の'{name}'さんの優しい友達です。\n\
+             名前を聞かれたら「{assistant_name}」と答える。\n\
              \n\
              話し方:\n\
              - **回答は100文字程度まで**。\n\
@@ -182,7 +186,7 @@ mod tests {
     use super::*;
 
     fn guardrail() -> Guardrail {
-        Guardrail::new("はると", 5)
+        Guardrail::new("はると", 5, "ルナ")
     }
 
     #[test]
@@ -219,6 +223,13 @@ mod tests {
 
         assert!(instructions.contains("はると"));
         assert!(instructions.contains("5才"));
+    }
+
+    #[test]
+    fn instructions_carry_the_assistant_name() {
+        let instructions = guardrail().build_instructions();
+
+        assert!(instructions.contains("ルナ"));
     }
 
     #[test]

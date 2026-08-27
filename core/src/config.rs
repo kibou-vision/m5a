@@ -20,6 +20,8 @@ const SSID_EXAMPLE: &str = "WiFiのSSIDをここに";
 const PASSWORD_EXAMPLE: &str = "WiFiのパスワードをここに";
 const API_KEY_EXAMPLE: &str = "sk-ここにAPIキーを";
 
+/// 既定のアシスタント名。名前を書かなくても自己紹介できるようにする。
+const DEFAULT_ASSISTANT_NAME: &str = "アシスタント";
 /// 既定のモデル。`gpt-realtime-mini` は2027-01-20に廃止されるため使わない。
 const DEFAULT_MODEL: &str = "gpt-realtime-2.1-mini";
 /// 既定の声。OpenAI が marin と cedar を推奨している。
@@ -42,6 +44,10 @@ pub const CONFIG_TEMPLATE: &str = r#"# m5a せってい ファイル
 name = "なまえをここに"
 # ねんれい。はなしかたの むずかしさ の めやす に つかいます。
 age = 5
+
+[assistant]
+# アシスタント じしん の なまえ。きかれたら この なまえ で こたえます。
+name = "アシスタント"
 
 [wifi]
 # つなぐ WiFi の なまえ (SSID) と パスワード。
@@ -113,6 +119,21 @@ pub struct ChildConfig {
     pub age: u8,
 }
 
+/// アシスタント自身についての設定。未記入なら既定の名前を使う。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AssistantConfig {
+    #[serde(default = "default_assistant_name")]
+    pub name: String,
+}
+
+impl Default for AssistantConfig {
+    fn default() -> Self {
+        Self {
+            name: default_assistant_name(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WifiConfig {
     pub ssid: String,
@@ -150,6 +171,8 @@ impl SearchConfig {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Config {
     pub child: ChildConfig,
+    #[serde(default)]
+    pub assistant: AssistantConfig,
     pub wifi: WifiConfig,
     pub openai: OpenAiConfig,
     #[serde(default)]
@@ -158,6 +181,10 @@ pub struct Config {
 
 fn default_age() -> u8 {
     5
+}
+
+fn default_assistant_name() -> String {
+    DEFAULT_ASSISTANT_NAME.to_string()
 }
 
 fn default_model() -> String {
@@ -425,6 +452,29 @@ mod tests {
         assert_eq!(config.openai.model, DEFAULT_MODEL);
         assert_eq!(config.openai.voice, DEFAULT_VOICE);
         assert_eq!(config.openai.audio_format, AudioFormat::Ulaw);
+    }
+
+    #[test]
+    fn assistant_name_defaults_when_absent() {
+        let source = filled_source().replace(
+            "[assistant]\n\
+             # アシスタント じしん の なまえ。きかれたら この なまえ で こたえます。\n\
+             name = \"アシスタント\"\n",
+            "",
+        );
+
+        let config = parse_config(&source).expect("[assistant] を省略しても読めるはず");
+
+        assert_eq!(config.assistant.name, "アシスタント");
+    }
+
+    #[test]
+    fn assistant_name_can_be_customized() {
+        let source = filled_source().replace("name = \"アシスタント\"", "name = \"ルナ\"");
+
+        let config = parse_config(&source).expect("記入済みなら読めるはず");
+
+        assert_eq!(config.assistant.name, "ルナ");
     }
 
     #[test]

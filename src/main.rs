@@ -79,8 +79,9 @@ fn read_settings() -> Result<Config, ConfigError> {
 fn report_settings(settings: &Result<Config, ConfigError>) {
     match settings {
         Ok(config) => log::info!(
-            "せっていを よみました: なまえ={} モデル={} こえ={}",
+            "せっていを よみました: なまえ={} アシスタント名={} モデル={} こえ={}",
             config.child.name,
+            config.assistant.name,
             config.openai.model,
             config.openai.voice
         ),
@@ -120,7 +121,7 @@ impl Runtime {
     fn new(modem: Modem<'static>, config: Option<Config>) -> Self {
         let guardrail = config
             .as_ref()
-            .map(|config| Guardrail::new(&config.child.name, config.child.age));
+            .map(|config| Guardrail::new(&config.child.name, config.child.age, &config.assistant.name));
 
         Self {
             config,
