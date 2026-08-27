@@ -17,10 +17,16 @@ const RIGHT_EYE_CENTER: Point = Point::new(240, 108);
 /// 掛かるので、目を細めるように見える。
 const EYE_WIDTH: u16 = 72;
 const EYE_HEIGHT: u16 = 72;
+/// 聞いているときは、より熱心に聞いている印象になるよう目そのものを
+/// 大きく見開かせる。
+const EYE_LISTENING_WIDTH: u16 = 84;
+const EYE_LISTENING_HEIGHT: u16 = 84;
 /// 閉じきっても線として見えるようにする下限。
 const EYE_MIN_HEIGHT: u16 = 4;
 
 const PUPIL_DIAMETER: u16 = 38;
+/// 聞いているときの瞳。目を大きくするのに合わせて瞳も大きくする。
+const PUPIL_LISTENING_DIAMETER: u16 = 44;
 /// 瞳を描くのに必要な目の開き具合。
 /// 瞳が目からはみ出さない大きさまで開いているときだけ描く。
 const PUPIL_VISIBLE_OPENNESS: u8 = 55;
@@ -28,6 +34,8 @@ const PUPIL_VISIBLE_OPENNESS: u8 = 55;
 const GAZE_TRAVEL: i16 = 14;
 /// 瞳が上下に動ける幅。目の外へはみ出さないよう左右より狭くする。
 const GAZE_TRAVEL_Y: i16 = 12;
+/// うなずきで目（白目と瞳）を丸ごと下げる大きさ。
+const NOD_TRAVEL: i16 = 14;
 
 const MOUTH_CENTER: Point = Point::new(160, 182);
 const MOUTH_WIDTH: u16 = 96;
@@ -203,16 +211,31 @@ impl FaceLayout {
 
 /// 顔ひとコマ分の配置を決める。
 pub fn lay_out_face(frame: &FaceFrame) -> FaceLayout {
+    // 聞いているときは、より熱心に聞いている印象になるよう
+    // 目そのもの（白目・瞳とも）を一回り大きくする。
+    let (eye_base_width, eye_base_height, pupil_diameter) =
+        if frame.expression == Expression::Listening {
+            (EYE_LISTENING_WIDTH, EYE_LISTENING_HEIGHT, PUPIL_LISTENING_DIAMETER)
+        } else {
+            (EYE_WIDTH, EYE_HEIGHT, PUPIL_DIAMETER)
+        };
+
     // 幅は表情ごとの開き具合だけで決め、まばたきの影響を受けない。
     // まばたきは高さにだけ重ねて掛け、まぶたが閉じる細まりとして表す。
     // これにより、まばたきしていない間はつねに幅=高さの真円になる。
-    let eye_width = (EYE_WIDTH * u16::from(frame.eye_openness) / 100).max(EYE_MIN_HEIGHT);
+    let eye_width = (eye_base_width * u16::from(frame.eye_openness) / 100).max(EYE_MIN_HEIGHT);
     let combined_openness =
         (u16::from(frame.eye_openness) * u16::from(frame.blink_openness) / 100) as u8;
-    let eye_height = (EYE_HEIGHT * u16::from(combined_openness) / 100).max(EYE_MIN_HEIGHT);
+    let eye_height = (eye_base_height * u16::from(combined_openness) / 100).max(EYE_MIN_HEIGHT);
     let shows_pupil = combined_openness >= PUPIL_VISIBLE_OPENNESS;
     let gaze_x = i16::from(frame.gaze_x) * GAZE_TRAVEL / 100;
     let gaze_y = i16::from(frame.gaze_y) * GAZE_TRAVEL_Y / 100;
+
+    // うなずきは白目と瞳をまとめて下へ動かす。目の中で瞳だけを動かす
+    // 流し目とは違い、目そのものの位置を動かす。
+    let nod_offset_y = NOD_TRAVEL * i16::from(frame.nod) / 100;
+    let left_eye_center = Point::new(LEFT_EYE_CENTER.x, LEFT_EYE_CENTER.y + nod_offset_y);
+    let right_eye_center = Point::new(RIGHT_EYE_CENTER.x, RIGHT_EYE_CENTER.y + nod_offset_y);
 
     FaceLayout {
         background: background_of(frame.expression),
@@ -223,10 +246,10 @@ pub fn lay_out_face(frame: &FaceFrame) -> FaceLayout {
                 SPINNER_DIAMETER,
             )
         }),
-        left_eye: Rect::around(LEFT_EYE_CENTER, eye_width, eye_height),
-        right_eye: Rect::around(RIGHT_EYE_CENTER, eye_width, eye_height),
-        left_pupil: lay_out_pupil(LEFT_EYE_CENTER, gaze_x, gaze_y, shows_pupil),
-        right_pupil: lay_out_pupil(RIGHT_EYE_CENTER, gaze_x, gaze_y, shows_pupil),
+        left_eye: Rect::around(left_eye_center, eye_width, eye_height),
+        right_eye: Rect::around(right_eye_center, eye_width, eye_height),
+        left_pupil: lay_out_pupil(left_eye_center, gaze_x, gaze_y, pupil_diameter, shows_pupil),
+        right_pupil: lay_out_pupil(right_eye_center, gaze_x, gaze_y, pupil_diameter, shows_pupil),
         mouth: lay_out_mouth(frame),
         brows: lay_out_brows(frame.expression),
         button: Rect::around(
@@ -325,13 +348,19 @@ fn button_color_of(expression: Expression) -> Color {
     }
 }
 
-fn lay_out_pupil(eye_center: Point, gaze_x: i16, gaze_y: i16, shows_pupil: bool) -> Option<Rect> {
+fn lay_out_pupil(
+    eye_center: Point,
+    gaze_x: i16,
+    gaze_y: i16,
+    pupil_diameter: u16,
+    shows_pupil: bool,
+) -> Option<Rect> {
     if !shows_pupil {
         return None;
     }
 
     let center = Point::new(eye_center.x + gaze_x, eye_center.y + gaze_y);
-    Some(Rect::around(center, PUPIL_DIAMETER, PUPIL_DIAMETER))
+    Some(Rect::around(center, pupil_diameter, pupil_diameter))
 }
 
 fn lay_out_mouth(frame: &FaceFrame) -> Mouth {
@@ -394,6 +423,7 @@ mod tests {
             mouth_openness: 0,
             gaze_x: 0,
             gaze_y: 0,
+            nod: 0,
         }
     }
 
@@ -643,12 +673,71 @@ mod tests {
 
     #[test]
     fn pupils_stay_inside_the_eyes() {
-        // 瞳が目より高いと、はみ出して見える。
+        // 瞳が目より高いと、はみ出して見える。聞いているときの大きな
+        // 目・瞳の組でも同じことを確かめる。
         let smallest_eye = EYE_HEIGHT * u16::from(PUPIL_VISIBLE_OPENNESS) / 100;
         assert!(
             PUPIL_DIAMETER <= smallest_eye,
             "瞳 {PUPIL_DIAMETER} が目の高さ {smallest_eye} を超えている"
         );
+
+        let smallest_listening_eye =
+            EYE_LISTENING_HEIGHT * u16::from(PUPIL_VISIBLE_OPENNESS) / 100;
+        assert!(
+            PUPIL_LISTENING_DIAMETER <= smallest_listening_eye,
+            "聞いているときの瞳 {PUPIL_LISTENING_DIAMETER} が目の高さ {smallest_listening_eye} を超えている"
+        );
+    }
+
+    #[test]
+    fn listening_eyes_and_pupils_are_bigger() {
+        let normal = lay_out_face(&frame(Expression::Idle, 100));
+        let listening = lay_out_face(&frame(Expression::Listening, 100));
+
+        assert!(
+            listening.left_eye.width > normal.left_eye.width,
+            "聞いているときの目のほうが大きいはず"
+        );
+        assert_eq!(
+            listening.left_eye.width, listening.left_eye.height,
+            "聞いているときも目は真円のはず"
+        );
+
+        let normal_pupil = normal.left_pupil.expect("開いた目には瞳が要る");
+        let listening_pupil = listening.left_pupil.expect("開いた目には瞳が要る");
+        assert!(
+            listening_pupil.width > normal_pupil.width,
+            "聞いているときの瞳のほうが大きいはず"
+        );
+    }
+
+    #[test]
+    fn nodding_moves_the_whole_eye_down() {
+        let neutral = lay_out_face(&frame(Expression::Listening, 100)).left_eye;
+        let nodded = lay_out_face(&FaceFrame {
+            nod: 100,
+            ..frame(Expression::Listening, 100)
+        })
+        .left_eye;
+
+        assert!(nodded.y > neutral.y, "うなずくと目が下がるはず");
+        assert_eq!(nodded.width, neutral.width, "うなずいても大きさは変わらないはず");
+        assert_eq!(nodded.height, neutral.height);
+    }
+
+    #[test]
+    fn nodding_moves_the_pupil_down_with_the_eye() {
+        let neutral = lay_out_face(&frame(Expression::Listening, 100))
+            .left_pupil
+            .expect("開いた目には瞳が要る");
+        let nodded = lay_out_face(&FaceFrame {
+            nod: 100,
+            ..frame(Expression::Listening, 100)
+        })
+        .left_pupil
+        .expect("開いた目には瞳が要る");
+
+        assert!(nodded.y > neutral.y, "うなずくと瞳も一緒に下がるはず");
     }
 
     #[test]
@@ -736,6 +825,7 @@ mod tests {
                 mouth_openness: 100,
                 gaze_x: 100,
                 gaze_y: 100,
+                nod: 100,
                 ..frame(expression, 100)
             });
 

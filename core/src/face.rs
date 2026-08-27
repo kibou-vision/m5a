@@ -42,6 +42,12 @@ const DOUBLE_BLINK_GAP_MS: u64 = 220;
 /// 待機中のまばたきが二連続になる確率の分母（1/N の確率で起こる）。
 const DOUBLE_BLINK_CHANCE_DENOM: u32 = 4;
 
+/// うなずき1回（下を向いてまた戻る）にかける時間。半分（約100ms）で
+/// 下を向き、残り半分で正面へ戻る。
+const NOD_PULSE_MS: u64 = 200;
+/// 二連続でうなずくときの、1回目と2回目の間隔。
+const NOD_GAP_MS: u64 = 120;
+
 /// 待機中の流し目の向き。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Glance {
@@ -130,6 +136,9 @@ pub struct FaceFrame {
     pub gaze_x: i8,
     /// 視線の上下。-100 が上、100 が下。
     pub gaze_y: i8,
+    /// うなずきの深さ。0 が正面、100 が最も下を向いた状態。
+    /// 目（白目と瞳）を丸ごと下へ動かすのに使う。
+    pub nod: u8,
 }
 
 /// 時刻を与えると顔のかたちを返す。
@@ -152,6 +161,9 @@ pub struct FaceAnimator {
     /// 現在の流し目にかける長さ（行き・留まり・帰りの合計）。
     /// 留まりの長さを毎回散らすため、開始のたびに決め直す。
     idle_glance_hold_ms: u64,
+    /// うなずきの予定。始まった時刻と、残りの回数（1 か 2）。
+    nod_started_at_ms: Option<u64>,
+    nod_pulses_remaining: u8,
     /// まばたき間隔などを散らすための擬似乱数の種。
     seed: u32,
 }
@@ -177,6 +189,8 @@ impl FaceAnimator {
             idle_glance_started_at_ms: None,
             // 最初の流し目が始まるときに決め直すので、値そのものは使われない。
             idle_glance_hold_ms: IDLE_GLANCE_TRANSITION_MS * 2 + IDLE_GLANCE_PLATEAU_MIN_MS,
+            nod_started_at_ms: None,
+            nod_pulses_remaining: 0,
             seed: 0x5A5A_1234,
         }
     }
@@ -190,10 +204,21 @@ impl FaceAnimator {
         self.voice_level = level.min(100);
     }
 
+    /// 子どもの声が聞こえたことを伝える。うなずきを1回、または2回始める。
+    /// 既にうなずいている最中は割り込まない。
+    pub fn trigger_nod(&mut self, now_ms: u64) {
+        if self.nod_started_at_ms.is_some() {
+            return;
+        }
+        self.nod_started_at_ms = Some(now_ms);
+        self.nod_pulses_remaining = if self.roll_double_nod() { 2 } else { 1 };
+    }
+
     /// その時刻の顔を返す。
     pub fn frame_at(&mut self, now_ms: u64) -> FaceFrame {
         self.advance_blink(now_ms);
         self.advance_idle_glance(now_ms);
+        self.advance_nod(now_ms);
 
         FaceFrame {
             expression: self.expression,
@@ -202,6 +227,7 @@ impl FaceAnimator {
             mouth_openness: self.mouth_openness(),
             gaze_x: self.gaze_x_at(now_ms),
             gaze_y: self.gaze_y_at(now_ms),
+            nod: self.nod_at(now_ms),
         }
     }
 
@@ -341,6 +367,55 @@ impl FaceAnimator {
             Glance::Down => self.idle_glance_magnitude(now_ms),
             _ => 0,
         }
+    }
+
+    /// うなずきの進み具合を進める。1回のうなずきが終わったら、
+    /// 二連続の予定が残っていれば間隔を空けてもう一度始める。
+    fn advance_nod(&mut self, now_ms: u64) {
+        let Some(started) = self.nod_started_at_ms else {
+            return;
+        };
+
+        if now_ms < started + NOD_PULSE_MS {
+            return;
+        }
+
+        self.nod_pulses_remaining = self.nod_pulses_remaining.saturating_sub(1);
+        self.nod_started_at_ms = if self.nod_pulses_remaining > 0 {
+            Some(started + NOD_PULSE_MS + NOD_GAP_MS)
+        } else {
+            None
+        };
+    }
+
+    fn roll_double_nod(&mut self) -> bool {
+        self.seed = self.seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        (self.seed >> 24) % 2 == 0
+    }
+
+    /// うなずきの深さ。聞いているときだけ動き、下を向いてまた正面へ戻る
+    /// 三角波を描く。
+    fn nod_at(&self, now_ms: u64) -> u8 {
+        if self.expression != Expression::Listening {
+            return 0;
+        }
+
+        let Some(started) = self.nod_started_at_ms else {
+            return 0;
+        };
+        if now_ms < started {
+            return 0;
+        }
+
+        let elapsed = (now_ms - started) as f32;
+        if elapsed >= NOD_PULSE_MS as f32 {
+            return 0;
+        }
+
+        let phase = elapsed / NOD_PULSE_MS as f32;
+        let ratio = (1.0 - (1.0 - 2.0 * phase).abs()).clamp(0.0, 1.0);
+
+        (100.0 * ratio) as u8
     }
 
     /// 流し目の大きさ。正面から向きへ、向きから正面へは瞬時に切り替えず、
@@ -671,6 +746,81 @@ mod tests {
             let frame = animator.frame_at(now_ms);
             assert_eq!(frame.eye_openness, Expression::Idle.resting_eye_openness());
         }
+    }
+
+    #[test]
+    fn nod_moves_down_and_back_up_while_listening() {
+        let mut animator = FaceAnimator::new();
+        animator.set_expression(Expression::Listening);
+        animator.trigger_nod(0);
+
+        assert_eq!(animator.frame_at(0).nod, 0, "始まりはまだ正面のはず");
+        assert_eq!(
+            animator.frame_at(NOD_PULSE_MS / 2).nod,
+            100,
+            "半分（約100ms）の時点で最も下を向くはず"
+        );
+
+        // 二連続の場合を含めても、十分待てば必ず正面へ戻って止まる。
+        assert_eq!(animator.frame_at(10_000).nod, 0, "うなずきは終われば正面へ戻るはず");
+    }
+
+    #[test]
+    fn nod_only_shows_while_listening() {
+        let mut animator = FaceAnimator::new();
+        animator.set_expression(Expression::Idle);
+        animator.trigger_nod(0);
+
+        for t in (0..1_000).step_by(20) {
+            assert_eq!(animator.frame_at(t).nod, 0, "Listening以外ではうなずかないはず");
+        }
+    }
+
+    #[test]
+    fn nod_does_not_interrupt_itself() {
+        let mut animator = FaceAnimator::new();
+        animator.set_expression(Expression::Listening);
+        animator.trigger_nod(0);
+
+        // うなずいている最中にもう一度伝えても、割り込んで最初からにはならない。
+        let midway_before = animator.frame_at(NOD_PULSE_MS / 4).nod;
+        animator.trigger_nod(NOD_PULSE_MS / 4);
+        let midway_after = animator.frame_at(NOD_PULSE_MS / 4).nod;
+
+        assert_eq!(midway_before, midway_after);
+    }
+
+    #[test]
+    fn nod_is_sometimes_once_and_sometimes_twice() {
+        let mut animator = FaceAnimator::new();
+        animator.set_expression(Expression::Listening);
+
+        let mut saw_single = false;
+        let mut saw_double = false;
+        let mut t = 0u64;
+        for _ in 0..40 {
+            animator.trigger_nod(t);
+
+            let mut peaks = 0;
+            let mut was_low = true;
+            for step in (0..2_000).step_by(10) {
+                let high = animator.frame_at(t + step).nod > 50;
+                if high && was_low {
+                    peaks += 1;
+                }
+                was_low = !high;
+            }
+
+            match peaks {
+                1 => saw_single = true,
+                2 => saw_double = true,
+                _ => {}
+            }
+            t += 3_000;
+        }
+
+        assert!(saw_single, "1回だけのうなずきも起きるはず");
+        assert!(saw_double, "2回連続のうなずきも起きるはず");
     }
 
     #[test]

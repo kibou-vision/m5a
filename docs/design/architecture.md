@@ -103,6 +103,7 @@ classDiagram
   class FaceAnimator {
     +set_expression(e)
     +set_voice_level(level)
+    +trigger_nod(now_ms)
     +frame_at(now_ms) FaceFrame
   }
 
@@ -113,6 +114,7 @@ classDiagram
     +mouth_openness: u8
     +gaze_x: i8
     +gaze_y: i8
+    +nod: u8
   }
 
   class LogEntry {

@@ -118,6 +118,8 @@ struct Runtime {
     finishing_response: bool,
     /// 録音中だけ持つ、声と沈黙の追跡。`Listening` の間だけ `Some`。
     turn: Option<TurnDetector>,
+    /// 声を検出した直後の一コマだけ立つ、うなずきの合図。
+    nod_pending: bool,
 }
 
 impl Runtime {
@@ -141,6 +143,7 @@ impl Runtime {
             pending_search: None,
             finishing_response: false,
             turn: None,
+            nod_pending: false,
         }
     }
 
@@ -356,16 +359,27 @@ impl Runtime {
 
     /// 録音中の沈黙を追跡し、話し終わり（または声が無いまま）を判定する。
     fn poll_turn(&mut self, elapsed_ms: u32) -> Option<AppEvent> {
-        self.turn.as_ref()?;
+        let detector = self.turn.as_mut()?;
+        let had_spoken = detector.has_spoken();
         let level = self.audio.as_ref().map_or(0, Audio::input_level);
         // しきい値が実機に合っているか、後で確かめられるように残す。
         log::debug!("マイクの音量: {level}");
-        let outcome = self.turn.as_mut()?.observe(level, elapsed_ms)?;
+        let outcome = detector.observe(level, elapsed_ms);
 
-        Some(match outcome {
+        // 声を検出した瞬間だけ、うなずきの合図を立てる。
+        if !had_spoken && self.turn.as_ref().is_some_and(TurnDetector::has_spoken) {
+            self.nod_pending = true;
+        }
+
+        outcome.map(|outcome| match outcome {
             TurnOutcome::SpeechEnded => AppEvent::SpeechEnded,
             TurnOutcome::NothingSaid => AppEvent::SpeechNotDetected,
         })
+    }
+
+    /// うなずきの合図が立っていれば、それを消費して伝える。
+    fn take_nod_pending(&mut self) -> bool {
+        std::mem::take(&mut self.nod_pending)
     }
 
     /// 応答終了の知らせを待たせていたら、実際に鳴らし終わったか確かめる。
@@ -626,6 +640,9 @@ fn run(modem: Modem<'static>, settings: Result<Config, ConfigError>) -> Result<(
 
         animator.set_expression(Expression::from_state(&state, failed_attempts));
         animator.set_voice_level(runtime.voice_level());
+        if runtime.take_nod_pending() {
+            animator.trigger_nod(now_ms);
+        }
         let frame = animator.frame_at(now_ms);
         let placement = layout::lay_out_face(&frame);
 
