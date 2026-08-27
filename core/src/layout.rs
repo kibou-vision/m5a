@@ -12,8 +12,9 @@ pub const SCREEN_HEIGHT: i16 = 240;
 /// 目の中心。
 const LEFT_EYE_CENTER: Point = Point::new(80, 108);
 const RIGHT_EYE_CENTER: Point = Point::new(240, 108);
-/// 目は幅を変えない。全開時は真円になり、まばたきや細めた目は
-/// まぶたが閉じる自然な見た目になるよう高さだけを縮める。
+/// 目の全開時の大きさ。表情による開き具合は幅と高さへ同じ比率で掛かるため
+/// まばたきしていない間はつねに真円になる。まばたきは高さにだけ重ねて
+/// 掛かるので、目を細めるように見える。
 const EYE_WIDTH: u16 = 72;
 const EYE_HEIGHT: u16 = 72;
 /// 閉じきっても線として見えるようにする下限。
@@ -202,8 +203,14 @@ impl FaceLayout {
 
 /// 顔ひとコマ分の配置を決める。
 pub fn lay_out_face(frame: &FaceFrame) -> FaceLayout {
-    let eye_height = (EYE_HEIGHT * u16::from(frame.eye_openness) / 100).max(EYE_MIN_HEIGHT);
-    let shows_pupil = frame.eye_openness >= PUPIL_VISIBLE_OPENNESS;
+    // 幅は表情ごとの開き具合だけで決め、まばたきの影響を受けない。
+    // まばたきは高さにだけ重ねて掛け、まぶたが閉じる細まりとして表す。
+    // これにより、まばたきしていない間はつねに幅=高さの真円になる。
+    let eye_width = (EYE_WIDTH * u16::from(frame.eye_openness) / 100).max(EYE_MIN_HEIGHT);
+    let combined_openness =
+        (u16::from(frame.eye_openness) * u16::from(frame.blink_openness) / 100) as u8;
+    let eye_height = (EYE_HEIGHT * u16::from(combined_openness) / 100).max(EYE_MIN_HEIGHT);
+    let shows_pupil = combined_openness >= PUPIL_VISIBLE_OPENNESS;
     let gaze_x = i16::from(frame.gaze_x) * GAZE_TRAVEL / 100;
     let gaze_y = i16::from(frame.gaze_y) * GAZE_TRAVEL_Y / 100;
 
@@ -216,8 +223,8 @@ pub fn lay_out_face(frame: &FaceFrame) -> FaceLayout {
                 SPINNER_DIAMETER,
             )
         }),
-        left_eye: Rect::around(LEFT_EYE_CENTER, EYE_WIDTH, eye_height),
-        right_eye: Rect::around(RIGHT_EYE_CENTER, EYE_WIDTH, eye_height),
+        left_eye: Rect::around(LEFT_EYE_CENTER, eye_width, eye_height),
+        right_eye: Rect::around(RIGHT_EYE_CENTER, eye_width, eye_height),
         left_pupil: lay_out_pupil(LEFT_EYE_CENTER, gaze_x, gaze_y, shows_pupil),
         right_pupil: lay_out_pupil(RIGHT_EYE_CENTER, gaze_x, gaze_y, shows_pupil),
         mouth: lay_out_mouth(frame),
@@ -377,10 +384,13 @@ mod tests {
     use super::*;
     use crate::face::{Expression, FaceFrame};
 
-    fn frame(expression: Expression, eye_openness: u8) -> FaceFrame {
+    /// `blink_openness` を変えて試験する。`eye_openness`（表情の開き具合）は
+    /// 全開のまま固定し、まばたきだけを動かす。
+    fn frame(expression: Expression, blink_openness: u8) -> FaceFrame {
         FaceFrame {
             expression,
-            eye_openness,
+            eye_openness: 100,
+            blink_openness,
             mouth_openness: 0,
             gaze_x: 0,
             gaze_y: 0,
@@ -397,11 +407,20 @@ mod tests {
     }
 
     #[test]
-    fn open_eyes_are_perfect_circles() {
-        let layout = lay_out_face(&frame(Expression::Listening, 100));
+    fn eyes_are_perfect_circles_whenever_not_blinking() {
+        // まばたきしていなければ、表情ごとの開き具合によらず常に真円になる。
+        for eye_openness in [40, 60, 80, 100] {
+            let layout = lay_out_face(&FaceFrame {
+                eye_openness,
+                ..frame(Expression::Idle, 100)
+            });
 
-        assert_eq!(layout.left_eye.width, layout.left_eye.height);
-        assert_eq!(layout.right_eye.width, layout.right_eye.height);
+            assert_eq!(
+                layout.left_eye.width, layout.left_eye.height,
+                "eye_openness={eye_openness} で目が楕円になった"
+            );
+            assert_eq!(layout.right_eye.width, layout.right_eye.height);
+        }
     }
 
     #[test]
@@ -414,11 +433,17 @@ mod tests {
     }
 
     #[test]
-    fn eyes_shrink_as_they_close() {
-        let wide = lay_out_face(&frame(Expression::Listening, 100)).left_eye.height;
-        let narrow = lay_out_face(&frame(Expression::Listening, 40)).left_eye.height;
+    fn blinking_narrows_the_eye_without_changing_its_width() {
+        let wide = lay_out_face(&frame(Expression::Idle, 100)).left_eye;
+        let narrowed = lay_out_face(&frame(Expression::Idle, 40)).left_eye;
 
-        assert!(narrow < wide, "細めた目のほうが低いはず: {narrow} < {wide}");
+        assert!(
+            narrowed.height < wide.height,
+            "まばたき中のほうが低いはず: {} < {}",
+            narrowed.height,
+            wide.height
+        );
+        assert_eq!(narrowed.width, wide.width, "まばたきで幅は変わらないはず");
     }
 
     #[test]

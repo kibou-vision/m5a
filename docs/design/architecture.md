@@ -109,6 +109,7 @@ classDiagram
   class FaceFrame {
     +expression: Expression
     +eye_openness: u8
+    +blink_openness: u8
     +mouth_openness: u8
     +gaze_x: i8
     +gaze_y: i8

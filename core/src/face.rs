@@ -21,11 +21,14 @@ pub const PATIENT_ATTEMPTS: u32 = 5;
 /// 考えているときに視線が左右に往復する周期。
 const GAZE_SWAY_PERIOD_MS: f32 = 1_800.0;
 
-/// 待機中、流し目を保つ長さ。行き帰りの遷移を含む。
-const IDLE_GLANCE_HOLD_MS: u64 = 900;
 /// 視線が正面から向きへ移り、また正面へ戻るのにかける長さ。
 /// 途中の向きを増やし、瞬間的に切り替わらずなめらかに動くようにする。
-const IDLE_GLANCE_TRANSITION_MS: u64 = 300;
+const IDLE_GLANCE_TRANSITION_MS: u64 = 100;
+/// 向きへ着いてから戻り始めるまで留める長さ。
+const IDLE_GLANCE_PLATEAU_MS: u64 = 500;
+/// 待機中、流し目を保つ長さ。行き（遷移）・留まり・帰り（遷移）の合計。
+const IDLE_GLANCE_HOLD_MS: u64 =
+    IDLE_GLANCE_TRANSITION_MS + IDLE_GLANCE_PLATEAU_MS + IDLE_GLANCE_TRANSITION_MS;
 /// 流し目の最短間隔。
 const IDLE_GLANCE_MIN_INTERVAL_MS: u64 = 4_000;
 /// 流し目の間隔の振れ幅。
@@ -88,7 +91,7 @@ impl Expression {
         self == Self::Waiting
     }
 
-    /// まばたきしていないときの目の開き具合。
+    /// 表情ごとの目の開き具合。まばたきとは独立で、常に真円の大きさを表す。
     fn resting_eye_openness(self) -> u8 {
         match self {
             Self::Waiting => 70,
@@ -114,8 +117,12 @@ impl Expression {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FaceFrame {
     pub expression: Expression,
-    /// 目の開き具合。0 が閉じ、100 が全開。
+    /// 表情ごとの目の開き具合。0 が閉じ、100 が全開。
+    /// まばたきの影響を受けない、常に真円の大きさ。
     pub eye_openness: u8,
+    /// まばたきによる目の細まり。0 が完全に閉じ、100 がまばたきしていない
+    /// 状態。真円の高さだけを縮めるのに使う（幅には使わない）。
+    pub blink_openness: u8,
     /// 口の開き具合。0 が閉じ、100 が全開。
     pub mouth_openness: u8,
     /// 視線の左右。-100 が左、100 が右。
@@ -184,7 +191,8 @@ impl FaceAnimator {
 
         FaceFrame {
             expression: self.expression,
-            eye_openness: self.eye_openness_at(now_ms),
+            eye_openness: self.expression.resting_eye_openness(),
+            blink_openness: self.blink_openness_at(now_ms),
             mouth_openness: self.mouth_openness(),
             gaze_x: self.gaze_x_at(now_ms),
             gaze_y: self.gaze_y_at(now_ms),
@@ -271,18 +279,17 @@ impl FaceAnimator {
         }
     }
 
-    fn eye_openness_at(&self, now_ms: u64) -> u8 {
-        let resting = self.expression.resting_eye_openness();
-
+    /// まばたきによる目の細まり。0 が完全に閉じ、100 がまばたきしていない状態。
+    fn blink_openness_at(&self, now_ms: u64) -> u8 {
         let Some(started) = self.blink_started_at_ms else {
-            return resting;
+            return 100;
         };
 
         // まばたきは閉じてから開くまでを直線で近似する。
         let elapsed = (now_ms - started) as f32 / BLINK_DURATION_MS as f32;
         let openness_ratio = (1.0 - 2.0 * elapsed).abs().clamp(0.0, 1.0);
 
-        (f32::from(resting) * openness_ratio) as u8
+        (100.0 * openness_ratio) as u8
     }
 
     fn mouth_openness(&self) -> u8 {
@@ -411,17 +418,17 @@ mod tests {
         let mut animator = FaceAnimator::new();
         animator.set_expression(Expression::Idle);
 
-        let before = animator.frame_at(BLINK_MIN_INTERVAL_MS - 1).eye_openness;
+        let before = animator.frame_at(BLINK_MIN_INTERVAL_MS - 1).blink_openness;
         let midway = animator
             .frame_at(BLINK_MIN_INTERVAL_MS + BLINK_DURATION_MS / 2)
-            .eye_openness;
+            .blink_openness;
         let after = animator
             .frame_at(BLINK_MIN_INTERVAL_MS + BLINK_DURATION_MS)
-            .eye_openness;
+            .blink_openness;
 
-        assert_eq!(before, Expression::Idle.resting_eye_openness());
+        assert_eq!(before, 100);
         assert_eq!(midway, 0);
-        assert_eq!(after, Expression::Idle.resting_eye_openness());
+        assert_eq!(after, 100);
     }
 
     #[test]
@@ -434,7 +441,7 @@ mod tests {
         let mut blink_count = 0;
         let mut was_closing = false;
         for now_ms in (0..60_000).step_by(20) {
-            let closing = animator.frame_at(now_ms).eye_openness < 30;
+            let closing = animator.frame_at(now_ms).blink_openness < 30;
             if closing && !was_closing {
                 blink_count += 1;
             }
@@ -531,7 +538,7 @@ mod tests {
         let mut closed_at = Vec::new();
         let mut was_closed = false;
         for now_ms in (0..300_000).step_by(10) {
-            let closed = animator.frame_at(now_ms).eye_openness == 0;
+            let closed = animator.frame_at(now_ms).blink_openness == 0;
             if closed && !was_closed {
                 closed_at.push(now_ms);
             }
@@ -565,6 +572,57 @@ mod tests {
         }
 
         assert!(saw_gradual_step, "流し目は途中の向きを経てなめらかに動くはず");
+    }
+
+    #[test]
+    fn idle_glance_timing_is_100_500_100() {
+        let mut animator = FaceAnimator::new();
+        animator.set_expression(Expression::Idle);
+
+        let mut started = None;
+        for t in (0..20_000).step_by(5) {
+            animator.frame_at(t);
+            if let Some(s) = animator.idle_glance_started_at_ms {
+                started = Some(s);
+                break;
+            }
+        }
+        let started = started.expect("流し目が始まらなかった");
+
+        let magnitude_at = |animator: &mut FaceAnimator, offset: u64| -> i8 {
+            let frame = animator.frame_at(started + offset);
+            frame.gaze_x.abs().max(frame.gaze_y.abs())
+        };
+
+        assert_eq!(magnitude_at(&mut animator, 0), 0, "遷移の始まりはまだ正面のはず");
+        assert_eq!(
+            magnitude_at(&mut animator, IDLE_GLANCE_TRANSITION_MS),
+            IDLE_GLANCE_MAGNITUDE,
+            "100msで向きに達するはず"
+        );
+        assert_eq!(
+            magnitude_at(&mut animator, IDLE_GLANCE_TRANSITION_MS + IDLE_GLANCE_PLATEAU_MS),
+            IDLE_GLANCE_MAGNITUDE,
+            "500ms留まる間は向きを保つはず"
+        );
+        assert_eq!(
+            magnitude_at(&mut animator, IDLE_GLANCE_HOLD_MS),
+            0,
+            "そこから100msで正面へ戻るはず"
+        );
+    }
+
+    #[test]
+    fn blinking_does_not_change_the_resting_eye_openness() {
+        let mut animator = FaceAnimator::new();
+        animator.set_expression(Expression::Idle);
+
+        // まばたきの最中でも、真円の大きさを表す eye_openness は
+        // 表情ごとの一定値のまま変わらない。細まりは blink_openness が表す。
+        for now_ms in (0..60_000).step_by(20) {
+            let frame = animator.frame_at(now_ms);
+            assert_eq!(frame.eye_openness, Expression::Idle.resting_eye_openness());
+        }
     }
 
     #[test]
