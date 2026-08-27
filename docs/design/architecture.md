@@ -112,7 +112,6 @@ classDiagram
     +mouth_openness: u8
     +gaze_x: i8
     +gaze_y: i8
-    +tongue_out: bool
   }
 
   class LogEntry {

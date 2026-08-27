@@ -21,8 +21,11 @@ pub const PATIENT_ATTEMPTS: u32 = 5;
 /// 考えているときに視線が左右に往復する周期。
 const GAZE_SWAY_PERIOD_MS: f32 = 1_800.0;
 
-/// 待機中、流し目を保つ長さ。
+/// 待機中、流し目を保つ長さ。行き帰りの遷移を含む。
 const IDLE_GLANCE_HOLD_MS: u64 = 900;
+/// 視線が正面から向きへ移り、また正面へ戻るのにかける長さ。
+/// 途中の向きを増やし、瞬間的に切り替わらずなめらかに動くようにする。
+const IDLE_GLANCE_TRANSITION_MS: u64 = 300;
 /// 流し目の最短間隔。
 const IDLE_GLANCE_MIN_INTERVAL_MS: u64 = 4_000;
 /// 流し目の間隔の振れ幅。
@@ -34,13 +37,6 @@ const IDLE_GLANCE_MAGNITUDE: i8 = 70;
 const DOUBLE_BLINK_GAP_MS: u64 = 220;
 /// 待機中のまばたきが二連続になる確率の分母（1/N の確率で起こる）。
 const DOUBLE_BLINK_CHANCE_DENOM: u32 = 4;
-
-/// てへぺろで舌を出している長さ。
-const TONGUE_DURATION_MS: u64 = 900;
-/// てへぺろの最短間隔。
-const TONGUE_MIN_INTERVAL_MS: u64 = 20_000;
-/// てへぺろの間隔の振れ幅。
-const TONGUE_INTERVAL_SPREAD_MS: u64 = 25_000;
 
 /// 待機中の流し目の向き。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -126,8 +122,6 @@ pub struct FaceFrame {
     pub gaze_x: i8,
     /// 視線の上下。-100 が上、100 が下。
     pub gaze_y: i8,
-    /// てへぺろで舌を出しているか。
-    pub tongue_out: bool,
 }
 
 /// 時刻を与えると顔のかたちを返す。
@@ -147,9 +141,6 @@ pub struct FaceAnimator {
     idle_glance: Glance,
     next_idle_glance_at_ms: u64,
     idle_glance_started_at_ms: Option<u64>,
-    /// てへぺろの予定。
-    next_tongue_at_ms: u64,
-    tongue_started_at_ms: Option<u64>,
     /// まばたき間隔などを散らすための擬似乱数の種。
     seed: u32,
 }
@@ -173,8 +164,6 @@ impl FaceAnimator {
             idle_glance: Glance::Center,
             next_idle_glance_at_ms: IDLE_GLANCE_MIN_INTERVAL_MS,
             idle_glance_started_at_ms: None,
-            next_tongue_at_ms: TONGUE_MIN_INTERVAL_MS,
-            tongue_started_at_ms: None,
             seed: 0x5A5A_1234,
         }
     }
@@ -192,15 +181,13 @@ impl FaceAnimator {
     pub fn frame_at(&mut self, now_ms: u64) -> FaceFrame {
         self.advance_blink(now_ms);
         self.advance_idle_glance(now_ms);
-        self.advance_tongue(now_ms);
 
         FaceFrame {
             expression: self.expression,
             eye_openness: self.eye_openness_at(now_ms),
             mouth_openness: self.mouth_openness(),
             gaze_x: self.gaze_x_at(now_ms),
-            gaze_y: self.gaze_y_at(),
-            tongue_out: self.tongue_started_at_ms.is_some(),
+            gaze_y: self.gaze_y_at(now_ms),
         }
     }
 
@@ -284,31 +271,6 @@ impl FaceAnimator {
         }
     }
 
-    /// 待機中だけ、ときどき舌を出す（てへぺろ）。
-    fn advance_tongue(&mut self, now_ms: u64) {
-        if self.expression != Expression::Idle {
-            self.tongue_started_at_ms = None;
-            return;
-        }
-
-        match self.tongue_started_at_ms {
-            Some(started) if now_ms >= started + TONGUE_DURATION_MS => {
-                self.tongue_started_at_ms = None;
-                self.next_tongue_at_ms = started + TONGUE_DURATION_MS + self.pick_tongue_interval();
-            }
-            None if now_ms >= self.next_tongue_at_ms => {
-                self.tongue_started_at_ms = Some(now_ms);
-            }
-            _ => {}
-        }
-    }
-
-    fn pick_tongue_interval(&mut self) -> u64 {
-        self.seed = self.seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
-        let spread = u64::from(self.seed >> 16) % TONGUE_INTERVAL_SPREAD_MS;
-        TONGUE_MIN_INTERVAL_MS + spread
-    }
-
     fn eye_openness_at(&self, now_ms: u64) -> u8 {
         let resting = self.expression.resting_eye_openness();
 
@@ -338,24 +300,46 @@ impl FaceAnimator {
                 (phase.sin() * 60.0) as i8
             }
             Expression::Idle => match self.idle_glance {
-                Glance::Left => -IDLE_GLANCE_MAGNITUDE,
-                Glance::Right => IDLE_GLANCE_MAGNITUDE,
+                Glance::Left => -self.idle_glance_magnitude(now_ms),
+                Glance::Right => self.idle_glance_magnitude(now_ms),
                 _ => 0,
             },
             _ => 0,
         }
     }
 
-    fn gaze_y_at(&self) -> i8 {
+    fn gaze_y_at(&self, now_ms: u64) -> i8 {
         if self.expression != Expression::Idle {
             return 0;
         }
 
         match self.idle_glance {
-            Glance::Up => -IDLE_GLANCE_MAGNITUDE,
-            Glance::Down => IDLE_GLANCE_MAGNITUDE,
+            Glance::Up => -self.idle_glance_magnitude(now_ms),
+            Glance::Down => self.idle_glance_magnitude(now_ms),
             _ => 0,
         }
+    }
+
+    /// 流し目の大きさ。正面から向きへ、向きから正面へは瞬時に切り替えず、
+    /// 途中の向きを挟んでなめらかに動かす。
+    fn idle_glance_magnitude(&self, now_ms: u64) -> i8 {
+        let Some(started) = self.idle_glance_started_at_ms else {
+            return 0;
+        };
+
+        let elapsed = now_ms.saturating_sub(started) as f32;
+        let hold = IDLE_GLANCE_HOLD_MS as f32;
+        let transition = IDLE_GLANCE_TRANSITION_MS as f32;
+
+        let ratio = if elapsed < transition {
+            elapsed / transition
+        } else if elapsed < hold - transition {
+            1.0
+        } else {
+            ((hold - elapsed) / transition).clamp(0.0, 1.0)
+        };
+
+        (f32::from(IDLE_GLANCE_MAGNITUDE) * ratio) as i8
     }
 }
 
@@ -562,29 +546,25 @@ mod tests {
     }
 
     #[test]
-    fn tongue_shows_only_while_idle_and_returns() {
+    fn idle_glances_move_gradually_instead_of_snapping() {
         let mut animator = FaceAnimator::new();
         animator.set_expression(Expression::Idle);
 
-        let mut saw_tongue = false;
-        let mut saw_tongue_hidden_after = false;
-        for t in (0..200_000).step_by(50) {
-            let out = animator.frame_at(t).tongue_out;
-            if out {
-                saw_tongue = true;
-            } else if saw_tongue {
-                saw_tongue_hidden_after = true;
+        // 流し目の途中の向きを踏むまで待ち、直前の一コマと比べて
+        // 一気にではなく少しずつ動いていることを確かめる。
+        let mut previous = 0i8;
+        let mut saw_gradual_step = false;
+        for t in (0..120_000).step_by(20) {
+            let current = animator.frame_at(t).gaze_x;
+            let delta = (current - previous).abs();
+            if current != 0 && delta > 0 && delta < IDLE_GLANCE_MAGNITUDE {
+                saw_gradual_step = true;
+                break;
             }
+            previous = current;
         }
 
-        assert!(saw_tongue, "てへぺろが一度も起きなかった");
-        assert!(saw_tongue_hidden_after, "舌は引っ込むはず");
-
-        let mut talking = FaceAnimator::new();
-        talking.set_expression(Expression::Talking);
-        for t in (0..200_000).step_by(50) {
-            assert!(!talking.frame_at(t).tongue_out, "Idle以外では舌を出さないはず");
-        }
+        assert!(saw_gradual_step, "流し目は途中の向きを経てなめらかに動くはず");
     }
 
     #[test]
