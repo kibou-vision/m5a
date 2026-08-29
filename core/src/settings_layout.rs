@@ -187,11 +187,13 @@ fn contains(rect: &Rect, at: Point) -> bool {
     (rect.x..rect.right()).contains(&at.x) && (rect.y..rect.bottom()).contains(&at.y)
 }
 
+/// 画面は英語の文字しか表示できないため（日本語フォントを組み込んで
+/// いない）、`describe`/`remedy` も呼び出し側で英語の文言を渡す前提。
 fn message_of(status: &ModuleStatus) -> String {
     match status {
         ModuleStatus::NotChecked => String::new(),
-        ModuleStatus::Checking => "たしかめています".to_string(),
-        ModuleStatus::Ready => "つかえます".to_string(),
+        ModuleStatus::Checking => "Checking...".to_string(),
+        ModuleStatus::Ready => "Ready".to_string(),
         ModuleStatus::Error { describe, remedy } => format!("{describe}\n{remedy}"),
     }
 }
@@ -266,8 +268,8 @@ mod tests {
     fn everything_stays_within_the_screen_width() {
         let mut statuses = ready_statuses();
         statuses.web_search = Some(ModuleStatus::Error {
-            describe: "検索できません".to_string(),
-            remedy: "APIキーを確かめてください".to_string(),
+            describe: "Search is unavailable".to_string(),
+            remedy: "Check the API key".to_string(),
         });
         let layout = lay_out_settings(&statuses, "marin");
 
@@ -349,8 +351,8 @@ mod tests {
     fn error_message_combines_describe_and_remedy() {
         let mut statuses = ready_statuses();
         statuses.wifi = ModuleStatus::Error {
-            describe: "WiFiに繋がりません".to_string(),
-            remedy: "SSIDを確かめてください".to_string(),
+            describe: "WiFi is not connected".to_string(),
+            remedy: "Check the SSID".to_string(),
         };
         let layout = lay_out_settings(&statuses, "marin");
 
@@ -359,7 +361,7 @@ mod tests {
             .iter()
             .find(|row| row.icon_symbol == IconSymbol::Wifi)
             .expect("wifi row exists");
-        assert!(wifi_row.message.contains("WiFiに繋がりません"));
-        assert!(wifi_row.message.contains("SSIDを確かめてください"));
+        assert!(wifi_row.message.contains("WiFi is not connected"));
+        assert!(wifi_row.message.contains("Check the SSID"));
     }
 }

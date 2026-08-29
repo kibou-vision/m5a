@@ -17,14 +17,17 @@ pub enum Module {
 
 impl Module {
     /// 画面に出すモジュール名。
+    ///
+    /// 実機の画面は英語の文字しか表示できないため（日本語フォントを
+    /// 組み込んでいない）、英語で置く。日本語の言い回しはログにだけ残す。
     pub fn label(self) -> &'static str {
         match self {
-            Self::Display => "画面",
-            Self::SdCard => "SDカード",
-            Self::Microphone => "マイク",
+            Self::Display => "Display",
+            Self::SdCard => "SD Card",
+            Self::Microphone => "Microphone",
             Self::Wifi => "WiFi",
-            Self::RealtimeSession => "話す相手",
-            Self::WebSearch => "インターネット検索",
+            Self::RealtimeSession => "Voice Chat",
+            Self::WebSearch => "Web Search",
         }
     }
 }
@@ -110,8 +113,8 @@ mod tests {
 
     fn error() -> ModuleStatus {
         ModuleStatus::Error {
-            describe: "だめでした".to_string(),
-            remedy: "なおしてください".to_string(),
+            describe: "Something went wrong".to_string(),
+            remedy: "Please fix it".to_string(),
         }
     }
 

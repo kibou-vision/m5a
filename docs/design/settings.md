@@ -75,9 +75,11 @@ classDiagram
 | 話す相手 | `Runtime::open_session()` で `Checking` にし、`Session::open` の成否で `Error` へ。実際に `Ready` になるのは `ServerEvent::SessionConfigured` を受けた `Runtime::receive()` |
 | インターネット検索 | `Runtime::new()` で `config.search.api_key()` の有無だけを見て決める（実際の疎通確認はしない） |
 
-WiFi・話す相手の失敗理由は、既存の `core::state::Failure::describe()` /
-`remedy()` をそのまま `ModuleStatus::Error` に流用する
-（`main.rs::module_error()`）。
+画面の文字は英語のみとする（実機に日本語フォントを組み込んでいないため）。
+`core::state::Failure::describe()`/`remedy()` や `ConfigError::describe()`/
+`remedy()` は会話ログ向けの日本語文言のため、そのままでは画面に出さない。
+`main.rs::module_error()`／`sd_card_status()` が `ModuleStatus::Error` 用に
+英語の文言を別途組み立てる。
 
 ## レイアウトと描画
 
@@ -110,7 +112,7 @@ Rust 側に複製する形をとった。
 
 ## 未解決の項目
 
-* 日本語ラベル（モジュール名・状態文・声の名前）を実機の画面で正しく
-  表示できるフォントの組み込みは未着手（[仕様の未確定の項目](../spec.md#未確定の項目)を参照）。
-  現状のビルドは `xtensa-esp32s3-espidf` ターゲットでコンパイルは通るが、
-  実機での見た目の確認はまだ行っていない
+* 画面の文字は英語のみとした（[仕様](../spec/settings.md#画面の文字は英語のみ)を参照）ため
+  日本語フォントの組み込みは不要になったが、実機での見た目（文字の可読性・
+  レイアウトの収まり具合）はまだ確認していない。現状のビルドは
+  `xtensa-esp32s3-espidf` ターゲットでコンパイルは通る

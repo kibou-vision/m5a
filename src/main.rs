@@ -240,8 +240,8 @@ impl Runtime {
             Err(error) => {
                 log::warn!("音を使えません: {error:#}");
                 self.module_statuses.microphone = ModuleStatus::Error {
-                    describe: format!("マイクを使えません: {error:#}"),
-                    remedy: "マイクの接続を確かめ、もう一度電源を入れてください".to_string(),
+                    describe: format!("Microphone unavailable: {error:#}"),
+                    remedy: "Check the microphone and power on again".to_string(),
                 };
             }
         }
@@ -603,8 +603,8 @@ impl Runtime {
             if let Err(error) = logbook::append_entry(&mut self.storage, &entry) {
                 log::warn!("ログを残せません: {error}");
                 self.module_statuses.sd_card = ModuleStatus::Error {
-                    describe: format!("SDカードに書き込めません: {error}"),
-                    remedy: "SDカードが入っているか、書き込み禁止になっていないか確かめてください"
+                    describe: format!("Cannot write to the SD card: {error}"),
+                    remedy: "Check that the SD card is inserted and not write-protected"
                         .to_string(),
                 };
                 return;
@@ -634,11 +634,27 @@ impl Runtime {
     }
 }
 
-/// [`Failure`] の日本語文言を、設定画面のモジュール状態にそのまま流用する。
+/// 設定画面のモジュール状態にする。画面は英語の文字しか表示できないため
+/// （日本語フォントを組み込んでいない）、[`Failure::describe`]/`remedy`
+/// （会話ログ向けの日本語）とは別に英語の文言をここで用意する。
 fn module_error(failure: Failure) -> ModuleStatus {
+    let (describe, remedy) = match failure {
+        Failure::Network => (
+            "WiFi is not connected",
+            "Check the WiFi name and password in config.toml. A 2.4GHz network is required.",
+        ),
+        Failure::Session => (
+            "Could not prepare the conversation",
+            "Check the API key in config.toml and your OpenAI balance.",
+        ),
+        Failure::Storage => (
+            "Cannot read the SD card",
+            "Check that the SD card is inserted.",
+        ),
+    };
     ModuleStatus::Error {
-        describe: failure.describe().to_string(),
-        remedy: failure.remedy().to_string(),
+        describe: describe.to_string(),
+        remedy: remedy.to_string(),
     }
 }
 
@@ -646,12 +662,14 @@ fn module_error(failure: Failure) -> ModuleStatus {
 /// それ以外（記入漏れ・書式誤り）はカード自体は読めているので `Ready`。
 fn sd_card_status(settings: &Result<Config, ConfigError>) -> ModuleStatus {
     match settings {
-        Err(error @ ConfigError::Unreadable(_)) | Err(error @ ConfigError::Unwritable) => {
-            ModuleStatus::Error {
-                describe: error.describe(),
-                remedy: error.remedy(),
-            }
-        }
+        Err(ConfigError::Unreadable(error)) => ModuleStatus::Error {
+            describe: format!("Cannot read the SD card: {error}"),
+            remedy: "Check that the SD card is inserted and not write-protected".to_string(),
+        },
+        Err(ConfigError::Unwritable) => ModuleStatus::Error {
+            describe: "Cannot save settings to the SD card".to_string(),
+            remedy: "Reformat the SD card as FAT32, then power on again".to_string(),
+        },
         _ => ModuleStatus::Ready,
     }
 }
