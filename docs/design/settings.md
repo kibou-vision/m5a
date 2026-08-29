@@ -27,8 +27,7 @@ classDiagram
 
   class ModuleStatus {
     <<enum>>
-    NotChecked / Checking / Ready
-    Error(describe, remedy)
+    NotChecked / Checking / Ready / Error
   }
 
   class ModuleStatuses {
@@ -75,11 +74,12 @@ classDiagram
 | 話す相手 | `Runtime::open_session()` で `Checking` にし、`Session::open` の成否で `Error` へ。実際に `Ready` になるのは `ServerEvent::SessionConfigured` を受けた `Runtime::receive()` |
 | インターネット検索 | `Runtime::new()` で `config.search.api_key()` の有無だけを見て決める（実際の疎通確認はしない） |
 
-画面の文字は英語のみとする（実機に日本語フォントを組み込んでいないため）。
-`core::state::Failure::describe()`/`remedy()` や `ConfigError::describe()`/
-`remedy()` は会話ログ向けの日本語文言のため、そのままでは画面に出さない。
-`main.rs::module_error()`／`sd_card_status()` が `ModuleStatus::Error` 用に
-英語の文言を別途組み立てる。
+画面には `Ready` / `Checking...` / `Failed` の3種類の短い単語しか出さない。
+何が起きたか・どう直すかの詳しい理由（`core::state::Failure::describe()`/
+`remedy()` や `ConfigError::describe()`/`remedy()`）は、5歳児向けの画面に
+長い英文を出しても読めないため出さず、シリアルログにだけ残す。
+`ModuleStatus::Error` はデータを持たない単純な印で、失敗の理由ごとに
+文言を作り分けることはしない。
 
 ## レイアウトと描画
 
@@ -91,9 +91,8 @@ classDiagram
 （`hal::settings_view::SettingsView` がコンテナに縦スクロールを許可する）。
 
 各行はアイコンと状態文だけを持ち、モジュール名の文字は出さない。
-アイコンだけでどのモジュールかは伝わり、失敗時の状態文
-（例:「WiFi is not connected」）も何が起きたかを言い当てているため、
-別に名前を添える必要がないと判断した。
+アイコンだけでどのモジュールかは伝わるため、別に名前を添える
+必要がないと判断した。
 
 アイコンは LVGL 9.5.0 の組み込みシンボルフォント（`lv_symbol_def.h`）の
 コードポイントを `hal::settings_view` 内で直接指定している。
@@ -112,17 +111,36 @@ Rust 側に複製する形をとった。既定の 14px フォントでは小さ
 
 ## スワイプ判定
 
-`core::gesture::detect_swipe()` が押し始めと離した座標から左右スワイプを
-判定する純関数。`hal::touch::TouchReader` は座標付きの
-`Pressed`／`Moved`／`Released` を返すよう拡張し、`main.rs` が押し始めの
-座標を覚えておいて離した瞬間に判定する。
+`core::gesture::detect_swipe()` が押し始めと現在（または離した）座標から
+左右スワイプを判定する純関数。`hal::touch::TouchReader` は座標付きの
+`Pressed`／`Moved`／`Released` を返すよう拡張してあり、`main.rs` は
+押し始めの座標を覚えておいて、指が動くたび（`Moved`）に毎回スワイプに
+なっていないか判定する。**指を離すのを待たない**——アシスタント画面は
+画面全体が「おはなしボタン」の当たり判定を兼ねており（[顔と画面](../spec/face.md)
+参照）、離すまで判定を待つと、録音が始まったまま切り替わらないように
+見えるため。移動量が閾値を超えて実際にスワイプと分かった瞬間に
+`swipe_start` を `None` に戻して即座に画面を切り替え、`Released` 側での
+二重判定を避ける（指を動かさずに離した「タップ」だけが `Released` 側の
+判定に残る）。
 
-アシスタント画面は指を置いた瞬間に録音を始める仕様（[顔と画面](../spec/face.md)
-参照）のため、スワイプのつもりで触れても、離すまではいったん録音が
-始まってしまう。離した瞬間にスワイプだったと判明したら、
-`AppEvent::SpeechNotDetected` を送って「何も言わずに録音を終えた」
-ことにし、静かに `Ready` へ戻す（新しいイベントは増やさず、既存の
-「声が無いまま沈黙が続いた」経路を再利用している）。
+押した瞬間はスワイプかタップか分からず、アシスタント画面では先に
+録音を始めてしまっている。実際にはスワイプだったと分かったら
+（`main.rs::handle_swipe()`）、`AppEvent::SpeechNotDetected` を送って
+「何も言わずに録音を終えた」ことにし、静かに `Ready` へ戻す
+（新しいイベントは増やさず、既存の「声が無いまま沈黙が続いた」経路を
+再利用している）。
+
+### 全モジュール準備完了による自動復帰との競合
+
+設定画面には「全モジュールが揃ったら自動でアシスタント画面に戻る」
+仕組みがある（[状態遷移](state.md#画面遷移)参照）。モジュールが
+すでに揃っている状態で親がスワイプして設定画面を開くと、次のフレーム
+（40ms後）にこの自動復帰が働いて即座に押し戻され、操作できないように
+見えてしまう。これを避けるため `main.rs::run()` は
+`auto_return_to_assistant: bool` を持ち、手動スワイプで設定画面を
+開いたときは `false` にして自動復帰を抑止する。抑止は
+`AppState::SetupRequired`／`Recovering` に入った（＝親が対処すべき
+問題が起きた）瞬間に再び `true` へ戻す。
 
 ## 起動時の表示
 

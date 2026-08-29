@@ -263,10 +263,7 @@ impl Runtime {
             }
             Err(error) => {
                 log::warn!("音を使えません: {error:#}");
-                self.module_statuses.microphone = ModuleStatus::Error {
-                    describe: format!("Microphone unavailable: {error:#}"),
-                    remedy: "Check the microphone and power on again".to_string(),
-                };
+                self.module_statuses.microphone = ModuleStatus::Error;
             }
         }
     }
@@ -282,7 +279,7 @@ impl Runtime {
                 Ok(connection) => self.wifi = Some(connection),
                 Err(error) => {
                     log::warn!("{error:#}");
-                    self.module_statuses.wifi = module_error(Failure::Network);
+                    self.module_statuses.wifi = ModuleStatus::Error;
                     return Some(AppEvent::Failed(Failure::Network));
                 }
             }
@@ -290,7 +287,7 @@ impl Runtime {
 
         if let Err(error) = wifi::attach(self.wifi.as_mut()?) {
             log::warn!("{error:#}");
-            self.module_statuses.wifi = module_error(Failure::Network);
+            self.module_statuses.wifi = ModuleStatus::Error;
             return Some(AppEvent::Failed(Failure::Network));
         }
 
@@ -341,7 +338,7 @@ impl Runtime {
             }
             Err(error) => {
                 log::warn!("{error:#}");
-                self.module_statuses.realtime_session = module_error(Failure::Session);
+                self.module_statuses.realtime_session = ModuleStatus::Error;
                 Some(AppEvent::Failed(Failure::Session))
             }
         }
@@ -626,11 +623,7 @@ impl Runtime {
         for entry in std::mem::take(&mut self.pending_logs) {
             if let Err(error) = logbook::append_entry(&mut self.storage, &entry) {
                 log::warn!("ログを残せません: {error}");
-                self.module_statuses.sd_card = ModuleStatus::Error {
-                    describe: format!("Cannot write to the SD card: {error}"),
-                    remedy: "Check that the SD card is inserted and not write-protected"
-                        .to_string(),
-                };
+                self.module_statuses.sd_card = ModuleStatus::Error;
                 return;
             }
         }
@@ -658,42 +651,12 @@ impl Runtime {
     }
 }
 
-/// 設定画面のモジュール状態にする。画面は英語の文字しか表示できないため
-/// （日本語フォントを組み込んでいない）、[`Failure::describe`]/`remedy`
-/// （会話ログ向けの日本語）とは別に英語の文言をここで用意する。
-fn module_error(failure: Failure) -> ModuleStatus {
-    let (describe, remedy) = match failure {
-        Failure::Network => (
-            "WiFi is not connected",
-            "Check the WiFi name and password in config.toml. A 2.4GHz network is required.",
-        ),
-        Failure::Session => (
-            "Could not prepare the conversation",
-            "Check the API key in config.toml and your OpenAI balance.",
-        ),
-        Failure::Storage => (
-            "Cannot read the SD card",
-            "Check that the SD card is inserted.",
-        ),
-    };
-    ModuleStatus::Error {
-        describe: describe.to_string(),
-        remedy: remedy.to_string(),
-    }
-}
-
 /// SDカードの読み書きに関わる設定エラーだけを、SDカードの不調として扱う。
 /// それ以外（記入漏れ・書式誤り）はカード自体は読めているので `Ready`。
+/// 何が起きたかは `report_settings()` がすでにシリアルログへ出している。
 fn sd_card_status(settings: &Result<Config, ConfigError>) -> ModuleStatus {
     match settings {
-        Err(ConfigError::Unreadable(error)) => ModuleStatus::Error {
-            describe: format!("Cannot read the SD card: {error}"),
-            remedy: "Check that the SD card is inserted and not write-protected".to_string(),
-        },
-        Err(ConfigError::Unwritable) => ModuleStatus::Error {
-            describe: "Cannot save settings to the SD card".to_string(),
-            remedy: "Reformat the SD card as FAT32, then power on again".to_string(),
-        },
+        Err(ConfigError::Unreadable(_) | ConfigError::Unwritable) => ModuleStatus::Error,
         _ => ModuleStatus::Ready,
     }
 }
@@ -724,11 +687,17 @@ fn run(
     let mut failed_attempts = 0_u32;
     let mut last_now_ms = uptime_ms();
     // スワイプ判定用に、指を置いた瞬間の座標を覚えておく。
+    // スワイプと判った時点で `None` に戻し、指を離したときに二重に
+    // 判定しないようにする。
     let mut swipe_start: Option<Point> = None;
+    // 全モジュールが揃ったときの設定画面からの自動復帰は、起動直後や
+    // 失敗からの回復時だけ働かせる。スワイプで自分から設定画面を
+    // 開いたときにまで働くと、開いた直後に押し戻されて操作できない。
+    let mut auto_return_to_assistant = true;
 
     runtime.open_audio();
     advance(&mut state, &mut runtime, startup);
-    sync_screen_for_state(&mut screen, &state);
+    sync_screen_for_state(&mut screen, &state, &mut auto_return_to_assistant);
     log::info!("画面の準備ができました");
 
     loop {
@@ -752,26 +721,43 @@ fn run(
                     if screen == Screen::Assistant {
                         if let Some(event) = to_event(TouchChange::Pressed(at)) {
                             advance(&mut state, &mut runtime, event);
-                            sync_screen_for_state(&mut screen, &state);
+                            sync_screen_for_state(&mut screen, &state, &mut auto_return_to_assistant);
                         }
                     }
                 }
-                TouchChange::Moved(_) => {}
+                // 指を離すのを待たず、動いた時点でスワイプと分かり次第すぐに
+                // 切り替える。画面全体がおはなしボタンの当たり判定を
+                // 兼ねているため、指を離すまで待つと「録音が始まった
+                // つもりのまま」に見えて切り替わらないように感じる。
+                TouchChange::Moved(at) => {
+                    if let Some(start) = swipe_start {
+                        if let Some(direction) = gesture::detect_swipe(start, at) {
+                            swipe_start = None;
+                            handle_swipe(
+                                direction,
+                                &mut screen,
+                                &mut state,
+                                &mut runtime,
+                                &mut auto_return_to_assistant,
+                            );
+                        }
+                    }
+                }
                 TouchChange::Released(at) => {
                     let swipe = swipe_start.take().and_then(|start| gesture::detect_swipe(start, at));
 
                     if let Some(direction) = swipe {
-                        // 押した瞬間はスワイプかタップか分からず、アシスタント画面
-                        // なら録音を始めてしまっている。実際にはスワイプだったので、
-                        // 何も言わずに録音を終えたことにして静かに片付ける。
-                        if state == AppState::Listening {
-                            advance(&mut state, &mut runtime, AppEvent::SpeechNotDetected);
-                        }
-                        screen = screen::transition_screen(screen, screen_event_of(direction));
+                        handle_swipe(
+                            direction,
+                            &mut screen,
+                            &mut state,
+                            &mut runtime,
+                            &mut auto_return_to_assistant,
+                        );
                     } else if screen == Screen::Assistant {
                         if let Some(event) = to_event(TouchChange::Released(at)) {
                             advance(&mut state, &mut runtime, event);
-                            sync_screen_for_state(&mut screen, &state);
+                            sync_screen_for_state(&mut screen, &state, &mut auto_return_to_assistant);
                         }
                     } else if let Some(voice) = settings_layout::voice_at(&settings_snapshot, at) {
                         runtime.select_voice(voice);
@@ -785,15 +771,15 @@ fn run(
 
         while let Some(event) = runtime.receive() {
             advance(&mut state, &mut runtime, event);
-            sync_screen_for_state(&mut screen, &state);
+            sync_screen_for_state(&mut screen, &state, &mut auto_return_to_assistant);
         }
         if let Some(event) = runtime.poll_playback() {
             advance(&mut state, &mut runtime, event);
-            sync_screen_for_state(&mut screen, &state);
+            sync_screen_for_state(&mut screen, &state, &mut auto_return_to_assistant);
         }
         if let Some(event) = runtime.poll_turn(elapsed_ms) {
             advance(&mut state, &mut runtime, event);
-            sync_screen_for_state(&mut screen, &state);
+            sync_screen_for_state(&mut screen, &state, &mut auto_return_to_assistant);
         }
 
         // 待機に戻ったときだけ、たまったログを書き出す余裕がある。
@@ -807,14 +793,18 @@ fn run(
             failed_attempts += 1;
             log::info!("やりなおします（{failed_attempts}回目）");
             advance(&mut state, &mut runtime, AppEvent::RetryRequested);
-            sync_screen_for_state(&mut screen, &state);
+            sync_screen_for_state(&mut screen, &state, &mut auto_return_to_assistant);
         }
         if state == AppState::Ready {
             failed_attempts = 0;
         }
 
         // 監視対象の全モジュールが整ったら、設定画面から自動的に戻る。
-        if screen == Screen::Settings && runtime.module_statuses.all_ready() {
+        // ただし自分でスワイプして開いた設定画面まで押し戻さない。
+        if screen == Screen::Settings
+            && auto_return_to_assistant
+            && runtime.module_statuses.all_ready()
+        {
             screen = screen::transition_screen(screen, ScreenEvent::AllModulesReady);
         }
 
@@ -856,10 +846,36 @@ fn screen_event_of(direction: SwipeDirection) -> ScreenEvent {
     }
 }
 
+/// スワイプが分かった時点で呼ぶ。画面を切り替え、押した瞬間に
+/// アシスタント画面だったせいで始まってしまっていた録音があれば、
+/// 何も言わずに終えたことにして静かに片付ける。
+fn handle_swipe(
+    direction: SwipeDirection,
+    screen: &mut Screen,
+    state: &mut AppState,
+    runtime: &mut Runtime,
+    auto_return_to_assistant: &mut bool,
+) {
+    if *state == AppState::Listening {
+        advance(state, runtime, AppEvent::SpeechNotDetected);
+    }
+
+    let event = screen_event_of(direction);
+    if event == ScreenEvent::SwipedToSettings {
+        // 自分で設定画面を開いたのだから、全モジュールが揃ったからと
+        // いって勝手に押し戻さない。
+        *auto_return_to_assistant = false;
+    }
+    *screen = screen::transition_screen(*screen, event);
+}
+
 /// 設定不備や失敗に入った瞬間、問答無用で設定画面へ切り替える。
-fn sync_screen_for_state(screen: &mut Screen, state: &AppState) {
+fn sync_screen_for_state(screen: &mut Screen, state: &AppState, auto_return_to_assistant: &mut bool) {
     if matches!(state, AppState::SetupRequired | AppState::Recovering(_)) {
         *screen = screen::transition_screen(*screen, ScreenEvent::ProblemDetected);
+        // 直しさえすれば自動的にアシスタント画面へ戻ってよい状況なので、
+        // 手動スワイプによる抑止は解除する。
+        *auto_return_to_assistant = true;
     }
 }
 

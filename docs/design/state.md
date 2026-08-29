@@ -91,3 +91,8 @@ stateDiagram-v2
 上書きする。各モジュールの準備状況は `core/src/module_status.rs` の
 `ModuleStatuses` が持ち、`core/src/settings_layout.rs` が設定画面の
 配置に変換する。
+
+`AllModulesReady` による自動復帰は、親が自分でスワイプして設定画面を
+開いた場合には働かせない（`main.rs::auto_return_to_assistant`）。
+詳細は [設定画面の設計](settings.md#全モジュール準備完了による自動復帰との競合)
+を参照。

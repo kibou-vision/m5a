@@ -69,7 +69,7 @@ impl BadgeSymbol {
         match status {
             ModuleStatus::NotChecked | ModuleStatus::Checking => Self::Checking,
             ModuleStatus::Ready => Self::Ok,
-            ModuleStatus::Error { .. } => Self::Warning,
+            ModuleStatus::Error => Self::Warning,
         }
     }
 }
@@ -180,14 +180,15 @@ fn contains(rect: &Rect, at: Point) -> bool {
     (rect.x..rect.right()).contains(&at.x) && (rect.y..rect.bottom()).contains(&at.y)
 }
 
-/// 画面は英語の文字しか表示できないため（日本語フォントを組み込んで
-/// いない）、`describe`/`remedy` も呼び出し側で英語の文言を渡す前提。
+/// 画面は英語の短い単語だけを出す。何が起きてどう直すかの詳しい理由は
+/// シリアルログにだけ残す（実機に日本語フォントを組み込んでおらず、
+/// 子ども向け画面に長い英文を出しても読めないため）。
 fn message_of(status: &ModuleStatus) -> String {
     match status {
         ModuleStatus::NotChecked => String::new(),
         ModuleStatus::Checking => "Checking...".to_string(),
         ModuleStatus::Ready => "Ready".to_string(),
-        ModuleStatus::Error { describe, remedy } => format!("{describe}\n{remedy}"),
+        ModuleStatus::Error => "Failed".to_string(),
     }
 }
 
@@ -195,7 +196,7 @@ fn color_of(status: &ModuleStatus) -> Color {
     match status {
         ModuleStatus::NotChecked | ModuleStatus::Checking => PENDING_COLOR,
         ModuleStatus::Ready => READY_COLOR,
-        ModuleStatus::Error { .. } => ERROR_COLOR,
+        ModuleStatus::Error => ERROR_COLOR,
     }
 }
 
@@ -260,10 +261,7 @@ mod tests {
     #[test]
     fn everything_stays_within_the_screen_width() {
         let mut statuses = ready_statuses();
-        statuses.web_search = Some(ModuleStatus::Error {
-            describe: "Search is unavailable".to_string(),
-            remedy: "Check the API key".to_string(),
-        });
+        statuses.web_search = Some(ModuleStatus::Error);
         let layout = lay_out_settings(&statuses, "marin");
 
         for row in &layout.rows {
@@ -341,12 +339,9 @@ mod tests {
     }
 
     #[test]
-    fn error_message_combines_describe_and_remedy() {
+    fn error_status_shows_a_short_failed_label() {
         let mut statuses = ready_statuses();
-        statuses.wifi = ModuleStatus::Error {
-            describe: "WiFi is not connected".to_string(),
-            remedy: "Check the SSID".to_string(),
-        };
+        statuses.wifi = ModuleStatus::Error;
         let layout = lay_out_settings(&statuses, "marin");
 
         let wifi_row = layout
@@ -354,7 +349,6 @@ mod tests {
             .iter()
             .find(|row| row.icon_symbol == IconSymbol::Wifi)
             .expect("wifi row exists");
-        assert!(wifi_row.message.contains("WiFi is not connected"));
-        assert!(wifi_row.message.contains("Check the SSID"));
+        assert_eq!(wifi_row.message, "Failed");
     }
 }

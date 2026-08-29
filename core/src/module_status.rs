@@ -24,8 +24,9 @@ pub enum ModuleStatus {
     Checking,
     /// 使える。
     Ready,
-    /// 使えない。何が起きてどう直せばよいかを添える。
-    Error { describe: String, remedy: String },
+    /// 使えない。詳しい理由はシリアルログにだけ残し、画面には
+    /// 「Failed」とだけ出す（子ども向け画面に長い英文は不要なため）。
+    Error,
 }
 
 impl ModuleStatus {
@@ -95,10 +96,7 @@ mod tests {
     }
 
     fn error() -> ModuleStatus {
-        ModuleStatus::Error {
-            describe: "Something went wrong".to_string(),
-            remedy: "Please fix it".to_string(),
-        }
+        ModuleStatus::Error
     }
 
     #[test]
