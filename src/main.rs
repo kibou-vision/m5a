@@ -279,7 +279,8 @@ impl Runtime {
                 Ok(connection) => self.wifi = Some(connection),
                 Err(error) => {
                     log::warn!("{error:#}");
-                    self.module_statuses.wifi = ModuleStatus::Error;
+                    // 失敗しても schedule_retry() が数秒後に自動でやり直し
+                    // 続けるため、Failedにはせず Checking のままにする。
                     return Some(AppEvent::Failed(Failure::Network));
                 }
             }
@@ -287,7 +288,6 @@ impl Runtime {
 
         if let Err(error) = wifi::attach(self.wifi.as_mut()?) {
             log::warn!("{error:#}");
-            self.module_statuses.wifi = ModuleStatus::Error;
             return Some(AppEvent::Failed(Failure::Network));
         }
 
@@ -338,7 +338,8 @@ impl Runtime {
             }
             Err(error) => {
                 log::warn!("{error:#}");
-                self.module_statuses.realtime_session = ModuleStatus::Error;
+                // WiFiと同様、schedule_retry()が自動でやり直すため
+                // Checkingのままにする。
                 Some(AppEvent::Failed(Failure::Session))
             }
         }

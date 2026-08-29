@@ -68,10 +68,10 @@ classDiagram
 | モジュール | 更新する場所 |
 |---|---|
 | 画面 | 常に `Ready` 固定。描画できている時点で動いているとみなす（起動できなければ設定画面自体を出せないため、失敗は検出できない既知の制約） |
-| SDカード | 起動時は `sd_card_status()`（`settings: Result<Config, ConfigError>` から判定）。実行中は `Runtime::flush_logs()` の書き込み失敗 |
-| マイク | `Runtime::open_audio()` |
-| WiFi | `Runtime::connect_network()`。開始時に `Checking`、成否で `Ready`／`Error` |
-| 話す相手 | `Runtime::open_session()` で `Checking` にし、`Session::open` の成否で `Error` へ。実際に `Ready` になるのは `ServerEvent::SessionConfigured` を受けた `Runtime::receive()` |
+| SDカード | 起動時は `sd_card_status()`（`settings: Result<Config, ConfigError>` から判定）。実行中は `Runtime::flush_logs()` の書き込み失敗で `Error` へ（自動でやり直す仕組みは無い） |
+| マイク | `Runtime::open_audio()`。起動時に一度だけ試すのみで、失敗したら再試行はしない |
+| WiFi | `Runtime::connect_network()`。開始時に `Checking`、成功で `Ready`。失敗しても `Error` にはせず `Checking` のまま留める（後述） |
+| 話す相手 | `Runtime::open_session()` で `Checking` にする。実際に `Ready` になるのは `ServerEvent::SessionConfigured` を受けた `Runtime::receive()`。失敗しても `Error` にはせず `Checking` のまま留める（後述） |
 | インターネット検索 | `Runtime::new()` で `config.search.api_key()` の有無だけを見て決める（実際の疎通確認はしない） |
 
 画面には `Ready` / `Checking...` / `Failed` の3種類の短い単語しか出さない。
@@ -80,6 +80,18 @@ classDiagram
 長い英文を出しても読めないため出さず、シリアルログにだけ残す。
 `ModuleStatus::Error` はデータを持たない単純な印で、失敗の理由ごとに
 文言を作り分けることはしない。
+
+### `Failed` を出すのは自動でやり直さない場合だけ
+
+WiFi・話す相手は失敗しても `AppState::Recovering` を経て
+`schedule_retry()` が3秒後に自動でやり直し続ける
+（[状態遷移](state.md#画面遷移)参照）。この2つを失敗のたびに
+`Error`（`Failed`表示）にすると、再接続を試みるたびに
+`Checking... → Failed → Checking...` と点滅して見え、実際には
+自動で直ろうとしているのに壊れたままに見えてしまう。そのため
+この2つは失敗しても `Checking` のまま留め、`Failed` を出さない。
+マイク・SDカードにはこの自動リトライの仕組みが無いため、
+失敗したら素直に `Error`（`Failed`表示）にする。
 
 ## レイアウトと描画
 
