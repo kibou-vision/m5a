@@ -5,12 +5,16 @@
 pub mod audio;
 pub mod config;
 pub mod face;
+pub mod gesture;
 pub mod greeting;
 pub mod guardrail;
 pub mod layout;
 pub mod logbook;
+pub mod module_status;
 pub mod ports;
 pub mod realtime;
+pub mod screen;
 pub mod search;
+pub mod settings_layout;
 pub mod state;
 pub mod turn_detector;

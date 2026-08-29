@@ -5,6 +5,7 @@ pub mod board;
 pub mod face;
 pub mod search;
 pub mod session;
+pub mod settings_view;
 pub mod storage;
 pub mod touch;
 pub mod wifi;

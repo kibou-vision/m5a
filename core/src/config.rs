@@ -28,7 +28,7 @@ const DEFAULT_MODEL: &str = "gpt-realtime-2.1-mini";
 const DEFAULT_VOICE: &str = "marin";
 
 /// Realtime API が受け付ける声の一覧。
-const SUPPORTED_VOICES: [&str; 10] = [
+pub const SUPPORTED_VOICES: [&str; 10] = [
     "alloy", "ash", "ballad", "coral", "echo", "sage", "shimmer", "verse", "marin", "cedar",
 ];
 
@@ -376,6 +376,69 @@ fn create_template<S: Storage>(storage: &mut S) -> Result<(), ConfigError> {
     Ok(())
 }
 
+/// 声の種類を `config.toml` に書き戻す。
+///
+/// 親が書いたコメントやレイアウトを壊さないよう、TOML全体を作り直すのではなく
+/// `[openai]` セクション内の `voice = "..."` 行だけを置き換える。
+pub fn save_voice<S: Storage>(storage: &mut S, voice: &str) -> Result<(), ConfigError> {
+    let source = storage
+        .read_text(CONFIG_PATH)
+        .map_err(ConfigError::Unreadable)?;
+
+    let updated = replace_openai_voice_line(&source, voice).ok_or_else(|| ConfigError::Malformed {
+        detail: "[openai] の voice の行が見つかりません".to_string(),
+    })?;
+
+    storage
+        .write_text(CONFIG_PATH, &updated)
+        .map_err(ConfigError::Unreadable)?;
+
+    let stored = storage
+        .read_text(CONFIG_PATH)
+        .map_err(|_| ConfigError::Unwritable)?;
+    if stored != updated {
+        return Err(ConfigError::Unwritable);
+    }
+
+    Ok(())
+}
+
+/// `[openai]` セクション内の `voice = "..."` 行だけを置き換える。
+/// 他の項目・コメント・空行はそのまま残す。
+fn replace_openai_voice_line(source: &str, voice: &str) -> Option<String> {
+    let mut in_openai_section = false;
+    let mut replaced = false;
+    let mut lines: Vec<String> = Vec::new();
+
+    for line in source.lines() {
+        let trimmed = line.trim();
+
+        if trimmed.starts_with('[') && trimmed.ends_with(']') {
+            in_openai_section = trimmed == "[openai]";
+        } else if in_openai_section && trimmed.starts_with("voice") {
+            let after_key = trimmed["voice".len()..].trim_start();
+            if let Some(rest) = after_key.strip_prefix('=') {
+                let _ = rest; // 値そのものは使わず、行全体を作り直す。
+                lines.push(format!("voice = \"{voice}\""));
+                replaced = true;
+                continue;
+            }
+        }
+
+        lines.push(line.to_string());
+    }
+
+    if !replaced {
+        return None;
+    }
+
+    let mut result = lines.join("\n");
+    if source.ends_with('\n') {
+        result.push('\n');
+    }
+    Some(result)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -564,6 +627,30 @@ mod tests {
         assert_eq!(config.openai.audio_format, AudioFormat::Pcm16);
         assert_eq!(config.openai.audio_format.wire_type(), "audio/pcm");
         assert_eq!(config.openai.audio_format.sample_rate(), 24_000);
+    }
+
+    #[test]
+    fn save_voice_replaces_only_the_voice_line() {
+        let mut storage = MemoryStorage::with_file(CONFIG_PATH, &filled_source());
+
+        save_voice(&mut storage, "cedar").expect("voice を保存できるはず");
+
+        let stored = storage.peek(CONFIG_PATH).expect("書き戻されているはず");
+        let config = parse_config(stored).expect("書き戻した内容も読めるはず");
+        assert_eq!(config.openai.voice, "cedar");
+        // 他の項目やコメントは残っている。
+        assert!(stored.contains("[openai]"));
+        assert!(stored.contains("使用するモデル"));
+        assert_eq!(config.child.name, "はると");
+    }
+
+    #[test]
+    fn save_voice_fails_when_voice_line_is_missing() {
+        let mut storage = MemoryStorage::with_file(CONFIG_PATH, "[child]\nname = \"はると\"\n");
+
+        let result = save_voice(&mut storage, "cedar");
+
+        assert!(matches!(result, Err(ConfigError::Malformed { .. })));
     }
 
     #[test]

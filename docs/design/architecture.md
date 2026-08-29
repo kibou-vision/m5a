@@ -117,6 +117,26 @@ classDiagram
     +nod: u8
   }
 
+  class Screen {
+    <<enum>>
+    Assistant / Settings
+  }
+
+  class ModuleStatuses {
+    +display: ModuleStatus
+    +sd_card: ModuleStatus
+    +microphone: ModuleStatus
+    +wifi: ModuleStatus
+    +realtime_session: ModuleStatus
+    +web_search: Option~ModuleStatus~
+    +all_ready() bool
+  }
+
+  class SettingsLayout {
+    +rows: Vec~StatusRow~
+    +voice_picker: Option~VoicePicker~
+  }
+
   class LogEntry {
     +at_unix: i64
     +speaker: Speaker
@@ -140,6 +160,10 @@ classDiagram
   FaceAnimator --> FaceFrame : 生成
   ServerEvent --> LogEntry : 文字起こしを記録
   LogEntry ..> Storage : 追記
+  ModuleStatuses --> SettingsLayout : 配置を決める
+  Config --> SettingsLayout : 選択中の声
+  AppState --> Screen : SetupRequired/Recovering で強制切替
+  ModuleStatuses --> Screen : 全Ready で自動復帰
 ```
 
 ## 責務の割り当て
@@ -158,6 +182,10 @@ classDiagram
 | `search` | web検索（Tavily）の tool 定義・リクエストの組み立て・結果の解析 |
 | `audio` | μ-law 変換、標本化周波数の変換、音量の算出 |
 | `logbook` | 会話ログの整形と追記 |
+| `screen` | アシスタント画面／設定画面のどちらを見せるかを決める |
+| `module_status` | 各モジュール（画面・SD・マイク・WiFi・話す相手・検索）の準備状況 |
+| `settings_layout` | 設定画面（ステータス一覧・声の選択）をどこに置くかを決める |
+| `gesture` | 指の動きからスワイプを判定する |
 
 ### `m5a`
 
@@ -165,10 +193,11 @@ classDiagram
 |---|---|
 | `hal::board` | BSP の呼び出し。I2C・画面・明るさ・SDカード・LVGL の鍵 |
 | `hal::face` | 配置を LVGL の部品に反映する |
-| `hal::touch` | LVGL が読んだ指の状態から押下・解放を取り出す |
+| `hal::settings_view` | 設定画面の配置を LVGL の部品に反映する |
+| `hal::touch` | LVGL が読んだ指の状態から押下・移動・解放を取り出す |
 | `hal::storage` | カード上のファイル操作（`Storage` の実装） |
 | `hal::search` | Tavily への実際の HTTPS 通信（別スレッド + チャンネル） |
-| `main` | 起動順序の制御と、状態遷移にもとづく処理の実行 |
+| `main` | 起動順序の制御と、状態遷移・画面遷移にもとづく処理の実行 |
 
 BSP が引き受けている範囲は次のとおり。自前で持たない。
 
