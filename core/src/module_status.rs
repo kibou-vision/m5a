@@ -15,23 +15,6 @@ pub enum Module {
     WebSearch,
 }
 
-impl Module {
-    /// 画面に出すモジュール名。
-    ///
-    /// 実機の画面は英語の文字しか表示できないため（日本語フォントを
-    /// 組み込んでいない）、英語で置く。日本語の言い回しはログにだけ残す。
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Display => "Display",
-            Self::SdCard => "SD Card",
-            Self::Microphone => "Microphone",
-            Self::Wifi => "WiFi",
-            Self::RealtimeSession => "Voice Chat",
-            Self::WebSearch => "Web Search",
-        }
-    }
-}
-
 /// モジュールひとつの現在状態。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ModuleStatus {

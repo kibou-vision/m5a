@@ -11,13 +11,13 @@ use crate::module_status::{Module, ModuleStatus, ModuleStatuses};
 const MARGIN: i16 = 6;
 /// モジュール1行分の高さ。標準構成（WebSearch無効・最大5行）なら、
 /// 声の一覧まで含めて画面高さ240に収まる大きさにしてある。
-const ROW_HEIGHT: u16 = 28;
+const ROW_HEIGHT: u16 = 34;
 /// アイコンの正方形の一辺。
-const ICON_SIZE: u16 = 20;
+const ICON_SIZE: u16 = 26;
 /// アイコンと文字の間隔。
-const ICON_GAP: i16 = 6;
+const ICON_GAP: i16 = 8;
 /// バッジ（読込中／OK／警告）の一辺。
-const BADGE_SIZE: u16 = 12;
+const BADGE_SIZE: u16 = 14;
 
 /// 声を選ぶボタン1個の大きさ。`SUPPORTED_VOICES` は10種類あるため2段×5列で並べる。
 const VOICE_BUTTON_WIDTH: u16 = 58;
@@ -75,15 +75,16 @@ impl BadgeSymbol {
 }
 
 /// モジュール1行分の配置。
+///
+/// アイコンだけでどのモジュールかは伝わるため、モジュール名の文字は
+/// 出さない。状態文（`message`）だけをアイコンの横に置く。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StatusRow {
     pub icon: Rect,
     pub icon_symbol: IconSymbol,
-    pub label_area: Rect,
     pub message_area: Rect,
     pub badge: Rect,
     pub badge_symbol: BadgeSymbol,
-    pub label: &'static str,
     /// 準備できていれば空文字。エラーなら「何が起きたか＋どう直すか」。
     pub message: String,
     pub color: Color,
@@ -129,17 +130,11 @@ pub fn lay_out_settings(statuses: &ModuleStatuses, current_voice: &str) -> Setti
         };
         let text_x = icon.right() + ICON_GAP;
         let text_width = (SCREEN_WIDTH - text_x - MARGIN - BADGE_SIZE as i16 - ICON_GAP) as u16;
-        let label_area = Rect {
+        let message_area = Rect {
             x: text_x,
             y,
             width: text_width,
-            height: ROW_HEIGHT / 2,
-        };
-        let message_area = Rect {
-            x: text_x,
-            y: y + ROW_HEIGHT as i16 / 2,
-            width: text_width,
-            height: ROW_HEIGHT / 2,
+            height: ROW_HEIGHT,
         };
         let badge = Rect {
             x: SCREEN_WIDTH - MARGIN - BADGE_SIZE as i16,
@@ -151,11 +146,9 @@ pub fn lay_out_settings(statuses: &ModuleStatuses, current_voice: &str) -> Setti
         rows.push(StatusRow {
             icon,
             icon_symbol: IconSymbol::of(*module),
-            label_area,
             message_area,
             badge,
             badge_symbol: BadgeSymbol::of(status),
-            label: module.label(),
             message: message_of(status),
             color: color_of(status),
         });

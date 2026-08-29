@@ -8,7 +8,6 @@ use std::ffi::CString;
 
 use esp_idf_svc::sys::bsp;
 use m5a_core::layout::{Color, Rect};
-use m5a_core::module_status::Module;
 use m5a_core::settings_layout::{
     self, BadgeSymbol, IconSymbol, SettingsLayout, StatusRow, VoiceOption,
 };
@@ -35,7 +34,6 @@ pub struct SettingsView {
 
 struct ModuleRow {
     icon: *mut bsp::lv_obj_t,
-    name: *mut bsp::lv_obj_t,
     message: *mut bsp::lv_obj_t,
     badge: *mut bsp::lv_obj_t,
 }
@@ -47,11 +45,16 @@ impl SettingsView {
             let screen = bsp::lv_screen_active();
             let container = make_container(screen);
 
-            let rows = std::array::from_fn(|_| ModuleRow {
-                icon: make_label(container),
-                name: make_label(container),
-                message: make_label(container),
-                badge: make_label(container),
+            let rows = std::array::from_fn(|_| {
+                let icon = make_label(container);
+                // アイコンだけ一回り大きいフォントで見せる。
+                bsp::lv_obj_set_style_text_font(icon, &bsp::lv_font_montserrat_20, MAIN_PART);
+
+                ModuleRow {
+                    icon,
+                    message: make_label(container),
+                    badge: make_label(container),
+                }
             });
 
             let voice_buttons = std::array::from_fn(|_| make_label(container));
@@ -119,11 +122,6 @@ unsafe fn write_row(row: &ModuleRow, status_row: &StatusRow) {
     bsp::lv_obj_set_style_text_color(row.icon, color_of(TEXT_COLOR), MAIN_PART);
     show(row.icon);
 
-    place(row.name, status_row.label_area);
-    set_text(row.name, status_row.label);
-    bsp::lv_obj_set_style_text_color(row.name, color_of(status_row.color), MAIN_PART);
-    show(row.name);
-
     place(row.message, status_row.message_area);
     set_text(row.message, &status_row.message);
     bsp::lv_obj_set_style_text_color(row.message, color_of(status_row.color), MAIN_PART);
@@ -137,7 +135,6 @@ unsafe fn write_row(row: &ModuleRow, status_row: &StatusRow) {
 
 unsafe fn hide_row(row: &ModuleRow) {
     hide(row.icon);
-    hide(row.name);
     hide(row.message);
     hide(row.badge);
 }
@@ -239,16 +236,4 @@ fn badge_glyph(symbol: BadgeSymbol) -> &'static str {
         BadgeSymbol::Ok => "\u{F00C}",       // LV_SYMBOL_OK
         BadgeSymbol::Warning => "\u{F071}",  // LV_SYMBOL_WARNING
     }
-}
-
-#[allow(dead_code)]
-fn module_order() -> [Module; MAX_ROWS] {
-    [
-        Module::Display,
-        Module::SdCard,
-        Module::Microphone,
-        Module::Wifi,
-        Module::RealtimeSession,
-        Module::WebSearch,
-    ]
 }

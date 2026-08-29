@@ -67,10 +67,34 @@ fn main() -> Result<()> {
     board::set_brightness(SCREEN_BRIGHTNESS)?;
     board::report_memory("画面の準備後");
 
+    // 顔・設定画面の部品は表示できるようになった直後に作り、SDカードの
+    // マウントなど時間のかかる処理より前に設定画面を一度出す。
+    // 起動直後、何も映らない時間をできるだけ短くするため。
+    let mut view = {
+        let _lock = DisplayLock::acquire();
+        FaceView::create()
+    };
+    let mut settings_view = {
+        let _lock = DisplayLock::acquire();
+        SettingsView::create()
+    };
+    show_booting_screen(&mut view, &mut settings_view);
+
     let settings = read_settings();
     report_settings(&settings);
 
-    run(peripherals.modem, settings)
+    run(peripherals.modem, settings, view, settings_view)
+}
+
+/// SDカードの読み込みなどが終わる前に、まず設定画面を一度描いておく。
+fn show_booting_screen(view: &mut FaceView, settings_view: &mut SettingsView) {
+    let statuses = m5a_core::module_status::ModuleStatuses::booting();
+    let placement = settings_layout::lay_out_settings(&statuses, "");
+
+    let _lock = DisplayLock::acquire();
+    view.hide();
+    settings_view.show();
+    settings_view.apply(&placement);
 }
 
 /// SD カードから設定を読む。
@@ -674,17 +698,13 @@ fn sd_card_status(settings: &Result<Config, ConfigError>) -> ModuleStatus {
     }
 }
 
-fn run(modem: Modem<'static>, settings: Result<Config, ConfigError>) -> Result<()> {
+fn run(
+    modem: Modem<'static>,
+    settings: Result<Config, ConfigError>,
+    mut view: FaceView,
+    mut settings_view: SettingsView,
+) -> Result<()> {
     let sd_card = sd_card_status(&settings);
-
-    let mut view = {
-        let _lock = DisplayLock::acquire();
-        FaceView::create()
-    };
-    let mut settings_view = {
-        let _lock = DisplayLock::acquire();
-        SettingsView::create()
-    };
 
     let startup = if settings.is_ok() {
         AppEvent::ConfigLoaded
@@ -741,6 +761,12 @@ fn run(modem: Modem<'static>, settings: Result<Config, ConfigError>) -> Result<(
                     let swipe = swipe_start.take().and_then(|start| gesture::detect_swipe(start, at));
 
                     if let Some(direction) = swipe {
+                        // 押した瞬間はスワイプかタップか分からず、アシスタント画面
+                        // なら録音を始めてしまっている。実際にはスワイプだったので、
+                        // 何も言わずに録音を終えたことにして静かに片付ける。
+                        if state == AppState::Listening {
+                            advance(&mut state, &mut runtime, AppEvent::SpeechNotDetected);
+                        }
                         screen = screen::transition_screen(screen, screen_event_of(direction));
                     } else if screen == Screen::Assistant {
                         if let Some(event) = to_event(TouchChange::Released(at)) {
