@@ -827,7 +827,12 @@ fn run(
     // つまみを本物の値と誤認し、明るさが読み込んだ値ではなく
     // スライダーの下限まで巻き戻ってしまう
     // （`BRIGHTNESS_MIN` へのクランプで顕在化した実機の不具合）。
-    settings_view.apply(&lay_out_current_settings(&runtime));
+    // LVGLの描画タスクと衝突しないよう、他の`apply()`呼び出しと同じく
+    // `DisplayLock`で描画を止めてから行う（怠るとwatchdogに落ちる）。
+    {
+        let _lock = DisplayLock::acquire();
+        settings_view.apply(&lay_out_current_settings(&runtime));
+    }
 
     loop {
         let now_ms = uptime_ms();

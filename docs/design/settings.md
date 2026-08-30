@@ -241,6 +241,11 @@ SDカードのマウントより前に初期化するため、`config.toml` の
 先に反映しておく。これによりループ1周目の `SettingsView::brightness()`
 はすでに正しい値を返す。
 
+この呼び出しも他の `apply()` 呼び出しと同じく `DisplayLock` が要る。
+最初の実装では省いてしまい、LVGL の描画タスクと衝突して task watchdog
+に落ちる不具合を実機で踏んだ（[CoreS3 の制約](hardware.md)の
+`bsp_display_enter_sleep()` の件と同じ種類の衝突）。
+
 ## スワイプ判定
 
 `core::gesture::detect_swipe()` が押し始めと現在（または離した）座標から
