@@ -40,6 +40,7 @@ pub struct SettingsView {
     /// アシスタント画面へ戻る閉じるボタン。
     close_button: *mut bsp::lv_obj_t,
     applied: Option<SettingsLayout>,
+    display_was_pressed: bool,
     speaker_was_pressed: bool,
     mic_was_pressed: bool,
 }
@@ -83,6 +84,7 @@ impl SettingsView {
                 voice_combo,
                 close_button,
                 applied: None,
+                display_was_pressed: false,
                 speaker_was_pressed: false,
                 mic_was_pressed: false,
             }
@@ -94,6 +96,12 @@ impl SettingsView {
         self.applied.as_ref()?.voice_picker.as_ref()?;
         let index = unsafe { bsp::lv_dropdown_get_selected(self.voice_combo) } as usize;
         SUPPORTED_VOICES.get(index).copied()
+    }
+
+    /// 画面の明るさスライダーの現在値。表示されていなければ `None`。
+    pub fn brightness(&mut self) -> Option<SliderReading> {
+        let slider = self.slider_of(IconSymbol::Display)?;
+        Some(unsafe { read_slider(slider, &mut self.display_was_pressed) })
     }
 
     /// スピーカー音量スライダーの現在値。表示されていなければ `None`。

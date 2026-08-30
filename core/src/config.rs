@@ -85,6 +85,10 @@ speaker_volume = 80
 # マイクの感度 (dB)。小さいと声を拾いにくくなります。
 # 設定画面のスライダーからも変えられます。
 mic_gain_db = 36
+
+[display]
+# 画面の明るさ (30〜100)。設定画面のスライダーからも変えられます。
+brightness = 50
 "#;
 
 /// 音声のやりとりに使う形式。
@@ -175,6 +179,22 @@ impl Default for AudioConfig {
     }
 }
 
+/// 画面の明るさ。設定画面のスライダーで変えられる。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DisplayConfig {
+    /// 画面の明るさ（百分率）。
+    #[serde(default = "default_brightness")]
+    pub brightness: u8,
+}
+
+impl Default for DisplayConfig {
+    fn default() -> Self {
+        Self {
+            brightness: default_brightness(),
+        }
+    }
+}
+
 /// web検索の設定。記入は任意で、無ければ検索の機能そのものを使わない。
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SearchConfig {
@@ -203,6 +223,8 @@ pub struct Config {
     pub search: SearchConfig,
     #[serde(default)]
     pub audio: AudioConfig,
+    #[serde(default)]
+    pub display: DisplayConfig,
 }
 
 fn default_age() -> u8 {
@@ -227,6 +249,10 @@ fn default_speaker_volume() -> u8 {
 
 fn default_mic_gain_db() -> u8 {
     36
+}
+
+fn default_brightness() -> u8 {
+    50
 }
 
 /// 設定内容の不備。いずれも親がファイルを直せば回復する。
@@ -430,6 +456,11 @@ pub fn save_speaker_volume<S: Storage>(storage: &mut S, percent: u8) -> Result<(
 /// マイクの感度を `config.toml` に書き戻す。
 pub fn save_mic_gain_db<S: Storage>(storage: &mut S, gain_db: u8) -> Result<(), ConfigError> {
     save_toml_line(storage, "audio", "mic_gain_db", &format!("mic_gain_db = {gain_db}"))
+}
+
+/// 画面の明るさを `config.toml` に書き戻す。
+pub fn save_brightness<S: Storage>(storage: &mut S, percent: u8) -> Result<(), ConfigError> {
+    save_toml_line(storage, "display", "brightness", &format!("brightness = {percent}"))
 }
 
 /// 親が書いたコメントやレイアウトを壊さないよう、TOML全体を作り直すのではなく
@@ -789,6 +820,47 @@ mod tests {
         assert!(stored.contains("speaker_volume = 50"));
         // 元からあった項目は残っている。
         assert!(stored.contains("name = \"はると\""));
+    }
+
+    #[test]
+    fn display_brightness_defaults_when_absent() {
+        let config = load_config(&mut MemoryStorage::with_file(CONFIG_PATH, &filled_source()))
+            .expect("記入済みなら読めるはず");
+
+        assert_eq!(config.display.brightness, 50);
+    }
+
+    #[test]
+    fn display_brightness_can_be_customized() {
+        let source = filled_source().replace("brightness = 50", "brightness = 70");
+
+        let config = parse_config(&source).expect("記入済みなら読めるはず");
+
+        assert_eq!(config.display.brightness, 70);
+    }
+
+    #[test]
+    fn save_brightness_replaces_only_that_line() {
+        let mut storage = MemoryStorage::with_file(CONFIG_PATH, &filled_source());
+
+        save_brightness(&mut storage, 65).expect("明るさを保存できるはず");
+
+        let stored = storage.peek(CONFIG_PATH).expect("書き戻されているはず");
+        let config = parse_config(stored).expect("書き戻した内容も読めるはず");
+        assert_eq!(config.display.brightness, 65);
+        assert_eq!(config.audio.speaker_volume, 80);
+    }
+
+    #[test]
+    fn save_brightness_appends_the_section_when_missing() {
+        // この機能を追加する前に作られた config.toml を想定する。
+        let mut storage = MemoryStorage::with_file(CONFIG_PATH, "[child]\nname = \"はると\"\n");
+
+        save_brightness(&mut storage, 40).expect("セクションが無くても保存できるはず");
+
+        let stored = storage.peek(CONFIG_PATH).expect("書き戻されているはず");
+        assert!(stored.contains("[display]"));
+        assert!(stored.contains("brightness = 40"));
     }
 
     #[test]

@@ -30,6 +30,10 @@ pub const SPEAKER_VOLUME_MAX: i32 = 100;
 /// マイク感度スライダーの範囲（dB）。
 pub const MIC_GAIN_MIN: i32 = 0;
 pub const MIC_GAIN_MAX: i32 = 42;
+/// 画面の明るさスライダーの範囲（百分率）。下限を30%に留めているのは、
+/// それ未満まで暗くすると実機で表示がほとんど見えなくなるため。
+pub const BRIGHTNESS_MIN: i32 = 30;
+pub const BRIGHTNESS_MAX: i32 = 100;
 
 /// 声を選ぶコンボボックスの大きさ。スピーカーの音量スライダーと
 /// 同じ行に並べるため、スライダーはその分だけ幅を譲る。
@@ -103,8 +107,8 @@ pub struct StatusRow {
     /// スライダーがある行では、準備できた時点でこちらも空文字にする。
     pub message: String,
     pub color: Color,
-    /// スピーカー・マイクの行が準備完了になったときだけ現れる、
-    /// 音量・感度を変えるスライダー。`message` の位置を置き換える。
+    /// 画面・スピーカー・マイクの行が準備完了になったときだけ現れる、
+    /// 明るさ・音量・感度を変えるスライダー。`message` の位置を置き換える。
     pub slider: Option<SliderSpec>,
 }
 
@@ -143,11 +147,12 @@ pub struct SettingsLayout {
 /// `current_voice` は選択中の声。`SUPPORTED_VOICES` に含まれない値が渡された
 /// 場合でも一覧はそのまま描き、先頭の声を選択中として扱う（`Config::validate()`
 /// を通った設定は必ず `SUPPORTED_VOICES` に含まれるため、実際には起こらない）。
-/// `speaker_volume`（百分率）と `mic_gain_db`（dB）は、それぞれの行が
-/// 準備完了になったときにスライダーへ渡す現在値。
+/// `brightness`（百分率）・`speaker_volume`（百分率）・`mic_gain_db`（dB）は、
+/// それぞれの行が準備完了になったときにスライダーへ渡す現在値。
 pub fn lay_out_settings(
     statuses: &ModuleStatuses,
     current_voice: &str,
+    brightness: u8,
     speaker_volume: u8,
     mic_gain_db: u8,
 ) -> SettingsLayout {
@@ -201,7 +206,16 @@ pub fn lay_out_settings(
 
         let slider = status
             .is_ready()
-            .then(|| slider_of(*module, message_area, slider_width, speaker_volume, mic_gain_db))
+            .then(|| {
+                slider_of(
+                    *module,
+                    message_area,
+                    slider_width,
+                    brightness,
+                    speaker_volume,
+                    mic_gain_db,
+                )
+            })
             .flatten();
         let message = if slider.is_some() { String::new() } else { message_of(status) };
 
@@ -263,12 +277,13 @@ fn message_of(status: &ModuleStatus) -> String {
     }
 }
 
-/// 準備完了になった行のうち、スピーカー・マイクだけにスライダーを与える。
+/// 準備完了になった行のうち、画面・スピーカー・マイクだけにスライダーを与える。
 /// `width` はコンボボックスと並べる分だけ削られていることがある。
 fn slider_of(
     module: Module,
     message_area: Rect,
     width: u16,
+    brightness: u8,
     speaker_volume: u8,
     mic_gain_db: u8,
 ) -> Option<SliderSpec> {
@@ -280,6 +295,12 @@ fn slider_of(
     };
 
     match module {
+        Module::Display => Some(SliderSpec {
+            area,
+            min: BRIGHTNESS_MIN,
+            max: BRIGHTNESS_MAX,
+            value: i32::from(brightness).clamp(BRIGHTNESS_MIN, BRIGHTNESS_MAX),
+        }),
         Module::Speaker => Some(SliderSpec {
             area,
             min: SPEAKER_VOLUME_MIN,
@@ -310,7 +331,8 @@ mod tests {
     use crate::layout::SCREEN_HEIGHT;
     use crate::module_status::ModuleStatuses;
 
-    /// テストで使う既定のスピーカー音量・マイク感度。
+    /// テストで使う既定の明るさ・スピーカー音量・マイク感度。
+    const BRIGHTNESS: u8 = 50;
     const VOLUME: u8 = 80;
     const GAIN_DB: u8 = 36;
 
@@ -325,7 +347,7 @@ mod tests {
     }
 
     fn layout_of(statuses: &ModuleStatuses, current_voice: &str) -> SettingsLayout {
-        lay_out_settings(statuses, current_voice, VOLUME, GAIN_DB)
+        lay_out_settings(statuses, current_voice, BRIGHTNESS, VOLUME, GAIN_DB)
     }
 
     /// モジュールの数が多い（WebSearchを含む）場合、縦方向は画面高さを
@@ -424,8 +446,18 @@ mod tests {
     }
 
     #[test]
-    fn speaker_and_microphone_show_a_slider_once_ready() {
+    fn display_speaker_and_microphone_show_a_slider_once_ready() {
         let layout = layout_of(&ready_statuses(), "marin");
+
+        let display_row = layout
+            .rows
+            .iter()
+            .find(|row| row.icon_symbol == IconSymbol::Display)
+            .expect("display row exists");
+        let slider = display_row.slider.expect("display is always ready");
+        assert_eq!(slider.value, i32::from(BRIGHTNESS));
+        assert_eq!((slider.min, slider.max), (30, 100));
+        assert!(display_row.message.is_empty());
 
         let speaker_row = layout
             .rows
@@ -478,7 +510,10 @@ mod tests {
         assert!(layout
             .rows
             .iter()
-            .filter(|row| !matches!(row.icon_symbol, IconSymbol::Speaker | IconSymbol::Microphone))
+            .filter(|row| !matches!(
+                row.icon_symbol,
+                IconSymbol::Display | IconSymbol::Speaker | IconSymbol::Microphone
+            ))
             .all(|row| row.slider.is_none()));
     }
 

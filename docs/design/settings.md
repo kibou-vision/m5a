@@ -59,7 +59,7 @@ classDiagram
     +close_button: Rect
   }
 
-  StatusRow --> SliderSpec : マイク・スピーカーがReadyの間だけ持つ
+  StatusRow --> SliderSpec : 画面・マイク・スピーカーがReadyの間だけ持つ
   SettingsLayout --> VoicePicker : 話す相手がReadyの間だけ持つ
 
   class SettingsView {
@@ -89,7 +89,7 @@ classDiagram
 
 | モジュール | 更新する場所 |
 |---|---|
-| 画面 | 常に `Ready` 固定。描画できている時点で動いているとみなす（起動できなければ設定画面自体を出せないため、失敗は検出できない既知の制約） |
+| 画面 | 常に `Ready` 固定。描画できている時点で動いているとみなす（起動できなければ設定画面自体を出せないため、失敗は検出できない既知の制約）。常に `Ready` なので、明るさスライダーは起動直後から出る |
 | SDカード | 起動時は `sd_card_status()`（`settings: Result<Config, ConfigError>` から判定）。実行中は `Runtime::flush_logs()` の書き込み失敗で `Error` へ（自動でやり直す仕組みは無い） |
 | マイク | `Runtime::open_audio()`。起動時に一度だけ試すのみで、失敗したら再試行はしない |
 | スピーカー | マイクと同じ `Runtime::open_audio()`（`hal::audio::Audio::start()` が両方を一度に開くため、成否も同時に決まる） |
@@ -148,8 +148,8 @@ Rust 側に複製する形をとった。既定の 14px フォントでは小さ
 `lv_dropdown`（コンボボックス）にまかせている。以前はボタンの
 2段×5列グリッドを自前で並べ、タップ位置の当たり判定
 （`core::settings_layout::voice_at()`、現在は削除済み）を純関数で
-書いていたが、ドラッグを扱うスライダーと同じ理由（[スピーカー音量・
-マイク感度のスライダー](#スピーカー音量マイク感度のスライダー)参照）で
+書いていたが、ドラッグを扱うスライダーと同じ理由（[画面の明るさ・
+スピーカー音量・マイク感度のスライダー](#画面の明るさスピーカー音量マイク感度のスライダー)参照）で
 ライブラリの部品に置き換えた。コアは選択肢の並び（`SUPPORTED_VOICES`）と
 コンボボックスの配置・現在の選択位置（`VoicePicker`）だけを決め、
 実機層は `main.rs::run()` の毎コマで `SettingsView::voice_selection()`
@@ -164,38 +164,52 @@ Rust 側に複製する形をとった。既定の 14px フォントでは小さ
 （[レイアウトと描画](#レイアウトと描画)参照）。話す相手（RealtimeSession）
 が準備できていない間は現れない。
 
-## スピーカー音量・マイク感度のスライダー
+## 画面の明るさ・スピーカー音量・マイク感度のスライダー
 
 声のボタンとは違い、ドラッグという連続した操作を扱うため、当たり判定を
 自前で書かず LVGL 標準の `lv_slider` ウィジェットにまかせている。
 つまみの描画・ドラッグの追従は LVGL 自身のタスクが行い、こちらは
-値の読み書きだけを行う。
+値の読み書きだけを行う。3つのスライダーとも仕組みは共通で、範囲だけが
+異なる（`core::settings_layout::BRIGHTNESS_MIN/MAX` など）。
 
-**ライブ反映と保存の分離** — ドラッグ中は毎コマ値を読み、実際の音量・
-感度（`hal::audio::Audio::set_speaker_volume()`/`set_mic_gain()`）へは
-即座に反映する一方、`/.m5a/config.toml` への書き込みは指を離した瞬間
-だけに絞る。毎コマSDカードへ書き込むと、書き込み回数がドラッグの
-コマ数（1回のドラッグで数十回）ぶん膨らみ、SDカードの摩耗と処理落ちの
-原因になるため。指を離した瞬間は `lv_obj_has_state(slider, LV_STATE_PRESSED)`
-の変化（真→偽）を毎コマ見て検出する（`hal::settings_view::read_slider()`）。
+**ライブ反映と保存の分離** — ドラッグ中は毎コマ値を読み、実際の明るさ・
+音量・感度（`hal::board::set_brightness()`、`hal::audio::Audio::set_speaker_volume()`/
+`set_mic_gain()`）へは即座に反映する一方、`/.m5a/config.toml` への
+書き込みは指を離した瞬間だけに絞る。毎コマSDカードへ書き込むと、
+書き込み回数がドラッグのコマ数（1回のドラッグで数十回）ぶん膨らみ、
+SDカードの摩耗と処理落ちの原因になるため。指を離した瞬間は
+`lv_obj_has_state(slider, LV_STATE_PRESSED)` の変化（真→偽）を毎コマ見て
+検出する（`hal::settings_view::read_slider()`）。
 
-**コーデックの取っ手は録音・再生の仕事スレッドの中にある** —
+**明るさだけは `Audio` を介さず直接効かせられる** —
 `Audio::start()` はマイク・スピーカーの取っ手（`Codec`）をそれぞれの
 仕事スレッドへ渡しきってしまうため、`Audio` 自身は直接
 `esp_codec_dev_set_in_gain`/`set_out_vol` を呼べない。そこで
 `Arc<AtomicU8>` で「望ましい値」を共有し、各スレッドが自分のループの
 中で値の変化を見つけたときにだけコーデックへ書き込む
-（`hal::audio::spawn_capture`/`spawn_playback`）。
+（`hal::audio::spawn_capture`/`spawn_playback`）。画面の明るさは
+バックライトの制御が BSP の同期呼び出し（`bsp_display_brightness_set`）
+一つで完結し、録音・再生のような専用スレッドに取っ手が閉じ込められて
+いないため、`Runtime::adjust_brightness()` から `board::set_brightness()`
+を直接その場で呼ぶだけでよい。
 
 **この一コマの描画に間に合わせる** — `main.rs::run()` は、この一コマの
-`SettingsLayout` を作る前に `SettingsView::speaker_volume()`/`mic_gain()`
-でつまみの現在値を読み、`Runtime::adjust_speaker_volume()`/
-`adjust_mic_gain()` で `Config` に反映してからレイアウトを作る。
-順序を逆にすると、この一コマの描画がまだ古い値のまま作られ、
-`SettingsView::apply()` がドラッグ中のつまみを一つ前の値へ
+`SettingsLayout` を作る前に `SettingsView::brightness()`/`speaker_volume()`/
+`mic_gain()` でつまみの現在値を読み、`Runtime::adjust_brightness()`/
+`adjust_speaker_volume()`/`adjust_mic_gain()` で `Config` に反映してから
+レイアウトを作る。順序を逆にすると、この一コマの描画がまだ古い値のまま
+作られ、`SettingsView::apply()` がドラッグ中のつまみを一つ前の値へ
 引き戻してしまう（[レイアウトと描画](#レイアウトと描画)の
 `apply()` は配置が変わったときだけ書き戻す設計と組み合わさって、
 本来は無害なはずの書き戻しが一コマ遅れると悪さをする）。
+
+**起動直後の明るさは、SDカードを読むまで既定値を使う** — 画面は
+SDカードのマウントより前に初期化するため、`config.toml` の
+`[display] brightness` を読める段階ではまだ画面が動いていない。
+`main()` は `board::start_display()` の直後、`SCREEN_BRIGHTNESS`
+（既定50%）で一旦点灯させ、設定を読み終えた時点で
+`board::set_brightness(config.display.brightness)` を呼んで
+親の設定値に差し替える。
 
 ## 閉じるボタン
 

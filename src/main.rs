@@ -35,7 +35,8 @@ use hal::wifi;
 
 use std::sync::mpsc::Receiver;
 
-/// 画面の明るさ。暗い部屋でもまぶしくない程度に抑える。
+/// SDカードを読むまでの間だけ使う、起動直後の明るさ。
+/// 読めたら `config.toml` の `[display] brightness` に従う。
 const SCREEN_BRIGHTNESS: u8 = 50;
 
 /// 顔を描き直す間隔。まばたきが滑らかに見える程度に保つ。
@@ -86,6 +87,13 @@ fn main() -> Result<()> {
 
     let settings = read_settings();
     report_settings(&settings);
+    // ここまでは SD カードをまだ読めていないため既定の明るさで映していた。
+    // 親が設定した値が分かったので、以後はそちらに従う。
+    if let Ok(config) = settings.as_ref() {
+        if let Err(error) = board::set_brightness(config.display.brightness) {
+            log::warn!("画面の明るさを変えられません: {error:#}");
+        }
+    }
 
     run(peripherals.modem, settings, view, settings_view)
 }
@@ -94,7 +102,7 @@ fn main() -> Result<()> {
 fn show_booting_screen(view: &mut FaceView, settings_view: &mut SettingsView) {
     let statuses = m5a_core::module_status::ModuleStatuses::booting();
     // 起動直後はどのモジュールも準備できていないため、スライダーの初期値は使われない。
-    let placement = settings_layout::lay_out_settings(&statuses, "", 0, 0);
+    let placement = settings_layout::lay_out_settings(&statuses, "", 0, 0, 0);
 
     let _lock = DisplayLock::acquire();
     view.hide();
@@ -668,6 +676,38 @@ impl Runtime {
         }
     }
 
+    /// スライダーで変えた画面の明るさを反映する。書き込みの間引きは
+    /// [`Self::adjust_speaker_volume`] と同じ理由による。
+    ///
+    /// マイク・スピーカーと違い、明るさは呼び出したその場で BSP に効くため
+    /// （録音・再生の仕事スレッドの中に取っ手が無い）、`Audio` を介さず
+    /// `board::set_brightness()` を直接呼ぶ。
+    fn adjust_brightness(&mut self, percent: i32, persist: bool) {
+        let Some(config) = self.config.as_mut() else {
+            return;
+        };
+        let percent = percent
+            .clamp(
+                settings_layout::BRIGHTNESS_MIN,
+                settings_layout::BRIGHTNESS_MAX,
+            ) as u8;
+
+        if config.display.brightness != percent {
+            config.display.brightness = percent;
+            if let Err(error) = board::set_brightness(percent) {
+                log::warn!("画面の明るさを変えられません: {error:#}");
+            }
+        }
+
+        if persist {
+            if let Err(error) = config::save_brightness(&mut self.storage, percent) {
+                log::warn!("明るさを保存できません: {}", error.describe());
+            } else {
+                log::info!("明るさを保存しました: {percent}%");
+            }
+        }
+    }
+
     /// スライダーで変えたスピーカー音量を反映する。
     ///
     /// ドラッグ中は毎コマ呼ばれるため、鳴らす側への反映はそのたびに行うが、
@@ -785,6 +825,9 @@ fn run(
         // スライダーの値を settings_snapshot の計算より先に取り込む。
         // 後にすると、この一コマの描画がまだ古い値のまま作られ、
         // ドラッグ中のつまみが古い位置へ引き戻されて見えてしまう。
+        if let Some(reading) = settings_view.brightness() {
+            runtime.adjust_brightness(reading.value, reading.released);
+        }
         if let Some(reading) = settings_view.speaker_volume() {
             runtime.adjust_speaker_volume(reading.value, reading.released);
         }
@@ -800,14 +843,21 @@ fn run(
             .as_ref()
             .map(|config| config.openai.voice.as_str())
             .unwrap_or_default();
-        let (speaker_volume, mic_gain_db) = runtime
+        let (brightness, speaker_volume, mic_gain_db) = runtime
             .config
             .as_ref()
-            .map(|config| (config.audio.speaker_volume, config.audio.mic_gain_db))
+            .map(|config| {
+                (
+                    config.display.brightness,
+                    config.audio.speaker_volume,
+                    config.audio.mic_gain_db,
+                )
+            })
             .unwrap_or_default();
         let settings_snapshot = settings_layout::lay_out_settings(
             &runtime.module_statuses,
             current_voice,
+            brightness,
             speaker_volume,
             mic_gain_db,
         );
