@@ -57,6 +57,17 @@ pub fn mount_sd_card() -> Result<()> {
     Ok(())
 }
 
+/// SD カードを安全に取り外せる状態にする。
+///
+/// `fs::write` が成功を返しても、SDカード自身の書き込みキャッシュに
+/// データが残ったままのことがある。電源を断つ前にアンマウントして
+/// ファイルシステムをきちんと同期させないと、直前に保存したはずの
+/// 設定やログが失われる（実機で確認済み。`power_off()` 参照）。
+pub fn unmount_sd_card() -> Result<()> {
+    esp!(unsafe { bsp::bsp_sdcard_unmount() }).context("SDカードを片付けられません")?;
+    Ok(())
+}
+
 /// タッチの入力装置。LVGL が読み取りを担う。
 pub fn touch_device() -> *mut bsp::lv_indev_t {
     unsafe { bsp::bsp_display_get_input_dev() }
@@ -83,6 +94,11 @@ const AXP2101_SOFT_OFF_BIT: u8 = 0x01;
 /// VRTC 以外のレール（ESP32-S3 本体の電源も含む）を実際に切る。
 /// 復帰には実機の電源ボタンでの起動が要る。
 ///
+/// AXP2101 の電源断は即座かつ完全なため、直前に保存した設定やログが
+/// SDカードの書き込みキャッシュに残ったままだと失われる。電源を切る
+/// 前に必ず [`unmount_sd_card()`] でファイルシステムを同期させておく
+/// （実機で、明るさの保存が次回起動に反映されない不具合として確認済み）。
+///
 /// AXP2101 と通信できなかった場合だけ、保険として
 /// `esp_deep_sleep_start()` にも落とす（起床要因は設定しないため、
 /// 通常は電源ボタンでの再起動が要る点は変わらない）。
@@ -93,6 +109,10 @@ pub fn power_off() -> ! {
             let _lock = DisplayLock::acquire();
             bsp::bsp_display_enter_sleep();
         }
+    }
+
+    if let Err(error) = unmount_sd_card() {
+        log::warn!("SDカードを同期できません（{error:#}）。設定の保存が失われる恐れがあります");
     }
 
     if let Err(error) = axp2101_shutdown() {
