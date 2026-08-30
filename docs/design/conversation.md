@@ -58,23 +58,24 @@ sequenceDiagram
   end
 
   Note over Main: 実際に声が聞こえた
-  loop 声のあとの無音が1.4秒続くまで
+  loop 声のあとの無音が1.4秒続くか、録音開始から15秒経つまで
     Main->>Audio: encode_ulaw_block(録音)
     Main->>Proto: build_audio_append()
     Proto->>API: input_audio_buffer.append
     Main->>Main: TurnDetector::observe()
   end
 
-  alt 声のあとに無音が1.4秒続いた
+  alt 声のあとに無音が1.4秒続いた、または録音開始から15秒経った
     Main->>State: SpeechEnded
     State-->>Main: Thinking ＋ StopCapture, RequestResponse
     Main->>Proto: build_audio_commit() / build_response_create()
     Proto->>API: commit ＋ response.create
-  else 声が一度も聞こえないまま無音が1.4秒続いた
+  else 声が一度も聞こえないまま無音が1.4秒続いた、または15秒経った
     Main->>State: SpeechNotDetected
     State-->>Main: Ready ＋ StopCapture
     Note over Main: 何も送らず終える
   end
+  Note over Main: 背景の音楽など常時鳴る音でしきい値を超え続けると無音が<br/>訪れないため、TurnDetector::MAX_DURATION_MS（15秒）で強制的に区切る
 
   API-->>Proto: input_audio_transcription.completed
   Proto-->>Main: ChildSaid
