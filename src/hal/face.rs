@@ -125,6 +125,23 @@ impl FaceView {
         }
     }
 
+    /// 設定画面から戻ってきたときに呼ぶ。実際に顔か読み込みの印を
+    /// 見せるかは、次に来る `apply` が判断する。
+    ///
+    /// 直前と同じ配置なら `apply` は何もしない仕組みのため、隠している
+    /// 間に憶えていた配置を捨て、次の `apply` で必ず見せ直させる。
+    pub fn show(&mut self) {
+        self.applied = None;
+    }
+
+    /// 設定画面を見せる間、顔をまるごと隠す。
+    pub fn hide(&self) {
+        unsafe {
+            hide(self.face);
+            hide(self.spinner);
+        }
+    }
+
     /// 配置を画面に反映する。前回と同じなら何もしない。
     pub fn apply(&mut self, layout: &FaceLayout) {
         if self.applied.as_ref() == Some(layout) {

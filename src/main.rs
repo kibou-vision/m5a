@@ -11,12 +11,16 @@ use esp_idf_svc::sntp::EspSntp;
 use m5a_core::config::{self, Config, ConfigError};
 use m5a_core::greeting::TimeOfDay;
 use m5a_core::face::{Expression, FaceAnimator};
+use m5a_core::gesture::{self, SwipeDirection};
 use m5a_core::guardrail::{Guardrail, Verdict};
-use m5a_core::layout;
+use m5a_core::layout::{self, Point};
 use m5a_core::logbook::{self, LogEntry, Speaker};
+use m5a_core::module_status::ModuleStatus;
 use m5a_core::ports::StorageError;
 use m5a_core::realtime::{self, ServerEvent, SessionSetup};
+use m5a_core::screen::{self, Screen, ScreenEvent};
 use m5a_core::search;
+use m5a_core::settings_layout;
 use m5a_core::state::{transition, AppAction, AppEvent, AppState, Failure};
 use m5a_core::turn_detector::{TurnDetector, TurnOutcome};
 
@@ -24,6 +28,7 @@ use hal::audio::Audio;
 use hal::board::{self, DisplayLock};
 use hal::face::FaceView;
 use hal::session::Session;
+use hal::settings_view::SettingsView;
 use hal::storage::SdStorage;
 use hal::touch::{TouchChange, TouchReader};
 use hal::wifi;
@@ -62,10 +67,34 @@ fn main() -> Result<()> {
     board::set_brightness(SCREEN_BRIGHTNESS)?;
     board::report_memory("画面の準備後");
 
+    // 顔・設定画面の部品は表示できるようになった直後に作り、SDカードの
+    // マウントなど時間のかかる処理より前に設定画面を一度出す。
+    // 起動直後、何も映らない時間をできるだけ短くするため。
+    let mut view = {
+        let _lock = DisplayLock::acquire();
+        FaceView::create()
+    };
+    let mut settings_view = {
+        let _lock = DisplayLock::acquire();
+        SettingsView::create()
+    };
+    show_booting_screen(&mut view, &mut settings_view);
+
     let settings = read_settings();
     report_settings(&settings);
 
-    run(peripherals.modem, settings)
+    run(peripherals.modem, settings, view, settings_view)
+}
+
+/// SDカードの読み込みなどが終わる前に、まず設定画面を一度描いておく。
+fn show_booting_screen(view: &mut FaceView, settings_view: &mut SettingsView) {
+    let statuses = m5a_core::module_status::ModuleStatuses::booting();
+    let placement = settings_layout::lay_out_settings(&statuses, "");
+
+    let _lock = DisplayLock::acquire();
+    view.hide();
+    settings_view.show();
+    settings_view.apply(&placement);
 }
 
 /// SD カードから設定を読む。
@@ -120,13 +149,24 @@ struct Runtime {
     turn: Option<TurnDetector>,
     /// 声を検出した直後の一コマだけ立つ、うなずきの合図。
     nod_pending: bool,
+    /// 各モジュール（画面・SD・マイク・WiFi・話す相手・検索）の準備状況。
+    /// 設定画面に一覧で出す。
+    module_statuses: m5a_core::module_status::ModuleStatuses,
 }
 
 impl Runtime {
-    fn new(modem: Modem<'static>, config: Option<Config>) -> Self {
+    fn new(modem: Modem<'static>, config: Option<Config>, sd_card: ModuleStatus) -> Self {
         let guardrail = config
             .as_ref()
             .map(|config| Guardrail::new(&config.child.name, config.child.age, &config.assistant.name));
+
+        let mut module_statuses = m5a_core::module_status::ModuleStatuses::booting();
+        module_statuses.sd_card = sd_card;
+        if let Some(config) = config.as_ref() {
+            if config.search.api_key().is_some() {
+                module_statuses.web_search = Some(ModuleStatus::Ready);
+            }
+        }
 
         Self {
             config,
@@ -144,6 +184,7 @@ impl Runtime {
             finishing_response: false,
             turn: None,
             nod_pending: false,
+            module_statuses,
         }
     }
 
@@ -216,12 +257,20 @@ impl Runtime {
         };
 
         match Audio::start(config.openai.audio_format) {
-            Ok(audio) => self.audio = Some(audio),
-            Err(error) => log::warn!("音を使えません: {error:#}"),
+            Ok(audio) => {
+                self.audio = Some(audio);
+                self.module_statuses.microphone = ModuleStatus::Ready;
+            }
+            Err(error) => {
+                log::warn!("音を使えません: {error:#}");
+                self.module_statuses.microphone = ModuleStatus::Error;
+            }
         }
     }
 
     fn connect_network(&mut self) -> Option<AppEvent> {
+        self.module_statuses.wifi = ModuleStatus::Checking;
+
         if self.wifi.is_none() {
             let credentials = &self.config.as_ref()?.wifi;
             let modem = self.modem.take()?;
@@ -230,6 +279,8 @@ impl Runtime {
                 Ok(connection) => self.wifi = Some(connection),
                 Err(error) => {
                     log::warn!("{error:#}");
+                    // 失敗しても schedule_retry() が数秒後に自動でやり直し
+                    // 続けるため、Failedにはせず Checking のままにする。
                     return Some(AppEvent::Failed(Failure::Network));
                 }
             }
@@ -244,6 +295,7 @@ impl Runtime {
             "WiFi に繋がりました: {}",
             wifi::describe_address(self.wifi.as_ref()?)
         );
+        self.module_statuses.wifi = ModuleStatus::Ready;
         // 時刻合わせは一度だけでよい。
         if self.clock.is_none() {
             self.clock = wifi::sync_clock();
@@ -253,6 +305,8 @@ impl Runtime {
     }
 
     fn open_session(&mut self) -> Option<AppEvent> {
+        self.module_statuses.realtime_session = ModuleStatus::Checking;
+
         let config = self.config.as_ref()?;
         let guardrail = self.guardrail.as_ref()?;
 
@@ -279,10 +333,13 @@ impl Runtime {
                 self.session = Some(session);
                 self.setup = Some(setup);
                 // 設定を送るのは接続が確立してから。合図はサーバから届く。
+                // 「使える」への切り替えは SessionConfigured の受信時。
                 None
             }
             Err(error) => {
                 log::warn!("{error:#}");
+                // WiFiと同様、schedule_retry()が自動でやり直すため
+                // Checkingのままにする。
                 Some(AppEvent::Failed(Failure::Session))
             }
         }
@@ -422,6 +479,7 @@ impl Runtime {
                 None
             }
             ServerEvent::SessionConfigured => {
+                self.module_statuses.realtime_session = ModuleStatus::Ready;
                 self.greet();
                 Some(AppEvent::SessionOpened)
             }
@@ -566,26 +624,62 @@ impl Runtime {
         for entry in std::mem::take(&mut self.pending_logs) {
             if let Err(error) = logbook::append_entry(&mut self.storage, &entry) {
                 log::warn!("ログを残せません: {error}");
+                self.module_statuses.sd_card = ModuleStatus::Error;
                 return;
             }
         }
     }
+
+    /// 設定画面で選ばれた声を反映し、SDカードへ書き戻す。
+    ///
+    /// 確立済みの対話セッションへは即座に反映されない
+    /// （Realtime APIはセッション確立後に声を変えられない）。
+    /// 次にセッションを開くとき（次回起動、または再接続時）から使われる。
+    fn select_voice(&mut self, voice: &str) {
+        let Some(config) = self.config.as_mut() else {
+            return;
+        };
+        if config.openai.voice == voice {
+            return;
+        }
+        config.openai.voice = voice.to_string();
+
+        if let Err(error) = config::save_voice(&mut self.storage, voice) {
+            log::warn!("声を保存できません: {}", error.describe());
+        } else {
+            log::info!("声を保存しました: {voice}");
+        }
+    }
 }
 
-fn run(modem: Modem<'static>, settings: Result<Config, ConfigError>) -> Result<()> {
-    let mut view = {
-        let _lock = DisplayLock::acquire();
-        FaceView::create()
-    };
+/// SDカードの読み書きに関わる設定エラーだけを、SDカードの不調として扱う。
+/// それ以外（記入漏れ・書式誤り）はカード自体は読めているので `Ready`。
+/// 何が起きたかは `report_settings()` がすでにシリアルログへ出している。
+fn sd_card_status(settings: &Result<Config, ConfigError>) -> ModuleStatus {
+    match settings {
+        Err(ConfigError::Unreadable(_) | ConfigError::Unwritable) => ModuleStatus::Error,
+        _ => ModuleStatus::Ready,
+    }
+}
+
+fn run(
+    modem: Modem<'static>,
+    settings: Result<Config, ConfigError>,
+    mut view: FaceView,
+    mut settings_view: SettingsView,
+) -> Result<()> {
+    let sd_card = sd_card_status(&settings);
 
     let startup = if settings.is_ok() {
         AppEvent::ConfigLoaded
     } else {
         AppEvent::ConfigRejected
     };
-    let mut runtime = Runtime::new(modem, settings.ok());
+    let mut runtime = Runtime::new(modem, settings.ok(), sd_card);
 
     let mut state = AppState::Booting;
+    // 起動直後は必ず設定画面から見せ、モジュールの準備状況を親が確かめられるようにする。
+    let mut screen = Screen::Settings;
     let mut animator = FaceAnimator::new();
     let mut touch = TouchReader::new(board::touch_device());
     let mut retry_at: Option<u64> = None;
@@ -593,9 +687,18 @@ fn run(modem: Modem<'static>, settings: Result<Config, ConfigError>) -> Result<(
     // それでも駄目なときだけ困り顔で親に伝える。
     let mut failed_attempts = 0_u32;
     let mut last_now_ms = uptime_ms();
+    // スワイプ判定用に、指を置いた瞬間の座標を覚えておく。
+    // スワイプと判った時点で `None` に戻し、指を離したときに二重に
+    // 判定しないようにする。
+    let mut swipe_start: Option<Point> = None;
+    // 全モジュールが揃ったときの設定画面からの自動復帰は、起動直後や
+    // 失敗からの回復時だけ働かせる。スワイプで自分から設定画面を
+    // 開いたときにまで働くと、開いた直後に押し戻されて操作できない。
+    let mut auto_return_to_assistant = true;
 
     runtime.open_audio();
     advance(&mut state, &mut runtime, startup);
+    sync_screen_for_state(&mut screen, &state, &mut auto_return_to_assistant);
     log::info!("画面の準備ができました");
 
     loop {
@@ -603,9 +706,64 @@ fn run(modem: Modem<'static>, settings: Result<Config, ConfigError>) -> Result<(
         let elapsed_ms = (now_ms - last_now_ms) as u32;
         last_now_ms = now_ms;
 
+        let current_voice = runtime
+            .config
+            .as_ref()
+            .map(|config| config.openai.voice.as_str())
+            .unwrap_or_default();
+        let settings_snapshot =
+            settings_layout::lay_out_settings(&runtime.module_statuses, current_voice);
+
         if let Some(change) = touch.poll() {
-            if let Some(event) = to_event(change) {
-                advance(&mut state, &mut runtime, event);
+            match change {
+                TouchChange::Pressed(at) => {
+                    swipe_start = Some(at);
+                    // 設定画面ではおはなしボタンの意味を持たせない。
+                    if screen == Screen::Assistant {
+                        if let Some(event) = to_event(TouchChange::Pressed(at)) {
+                            advance(&mut state, &mut runtime, event);
+                            sync_screen_for_state(&mut screen, &state, &mut auto_return_to_assistant);
+                        }
+                    }
+                }
+                // 指を離すのを待たず、動いた時点でスワイプと分かり次第すぐに
+                // 切り替える。画面全体がおはなしボタンの当たり判定を
+                // 兼ねているため、指を離すまで待つと「録音が始まった
+                // つもりのまま」に見えて切り替わらないように感じる。
+                TouchChange::Moved(at) => {
+                    if let Some(start) = swipe_start {
+                        if let Some(direction) = gesture::detect_swipe(start, at) {
+                            swipe_start = None;
+                            handle_swipe(
+                                direction,
+                                &mut screen,
+                                &mut state,
+                                &mut runtime,
+                                &mut auto_return_to_assistant,
+                            );
+                        }
+                    }
+                }
+                TouchChange::Released(at) => {
+                    let swipe = swipe_start.take().and_then(|start| gesture::detect_swipe(start, at));
+
+                    if let Some(direction) = swipe {
+                        handle_swipe(
+                            direction,
+                            &mut screen,
+                            &mut state,
+                            &mut runtime,
+                            &mut auto_return_to_assistant,
+                        );
+                    } else if screen == Screen::Assistant {
+                        if let Some(event) = to_event(TouchChange::Released(at)) {
+                            advance(&mut state, &mut runtime, event);
+                            sync_screen_for_state(&mut screen, &state, &mut auto_return_to_assistant);
+                        }
+                    } else if let Some(voice) = settings_layout::voice_at(&settings_snapshot, at) {
+                        runtime.select_voice(voice);
+                    }
+                }
             }
         }
 
@@ -614,12 +772,15 @@ fn run(modem: Modem<'static>, settings: Result<Config, ConfigError>) -> Result<(
 
         while let Some(event) = runtime.receive() {
             advance(&mut state, &mut runtime, event);
+            sync_screen_for_state(&mut screen, &state, &mut auto_return_to_assistant);
         }
         if let Some(event) = runtime.poll_playback() {
             advance(&mut state, &mut runtime, event);
+            sync_screen_for_state(&mut screen, &state, &mut auto_return_to_assistant);
         }
         if let Some(event) = runtime.poll_turn(elapsed_ms) {
             advance(&mut state, &mut runtime, event);
+            sync_screen_for_state(&mut screen, &state, &mut auto_return_to_assistant);
         }
 
         // 待機に戻ったときだけ、たまったログを書き出す余裕がある。
@@ -633,25 +794,89 @@ fn run(modem: Modem<'static>, settings: Result<Config, ConfigError>) -> Result<(
             failed_attempts += 1;
             log::info!("やりなおします（{failed_attempts}回目）");
             advance(&mut state, &mut runtime, AppEvent::RetryRequested);
+            sync_screen_for_state(&mut screen, &state, &mut auto_return_to_assistant);
         }
         if state == AppState::Ready {
             failed_attempts = 0;
         }
 
-        animator.set_expression(Expression::from_state(&state, failed_attempts));
-        animator.set_voice_level(runtime.voice_level());
-        if runtime.take_nod_pending() {
-            animator.trigger_nod(now_ms);
-        }
-        let frame = animator.frame_at(now_ms);
-        let placement = layout::lay_out_face(&frame);
-
+        // 監視対象の全モジュールが整ったら、設定画面から自動的に戻る。
+        // ただし自分でスワイプして開いた設定画面まで押し戻さない。
+        if screen == Screen::Settings
+            && auto_return_to_assistant
+            && runtime.module_statuses.all_ready()
         {
-            let _lock = DisplayLock::acquire();
-            view.apply(&placement);
+            screen = screen::transition_screen(screen, ScreenEvent::AllModulesReady);
+        }
+
+        let nod_pending = runtime.take_nod_pending();
+
+        match screen {
+            Screen::Assistant => {
+                animator.set_expression(Expression::from_state(&state, failed_attempts));
+                animator.set_voice_level(runtime.voice_level());
+                if nod_pending {
+                    animator.trigger_nod(now_ms);
+                }
+                let frame = animator.frame_at(now_ms);
+                let placement = layout::lay_out_face(&frame);
+
+                let _lock = DisplayLock::acquire();
+                settings_view.hide();
+                view.show();
+                view.apply(&placement);
+            }
+            Screen::Settings => {
+                let _lock = DisplayLock::acquire();
+                view.hide();
+                settings_view.show();
+                settings_view.apply(&settings_snapshot);
+            }
         }
 
         FreeRtos::delay_ms(FRAME_INTERVAL_MS);
+    }
+}
+
+/// 画面ときっかけから次の画面を決め、`screen` を更新する。
+fn screen_event_of(direction: SwipeDirection) -> ScreenEvent {
+    match direction {
+        // 右から左へのスワイプで設定画面へ、逆で戻る。
+        SwipeDirection::Left => ScreenEvent::SwipedToSettings,
+        SwipeDirection::Right => ScreenEvent::SwipedToAssistant,
+    }
+}
+
+/// スワイプが分かった時点で呼ぶ。画面を切り替え、押した瞬間に
+/// アシスタント画面だったせいで始まってしまっていた録音があれば、
+/// 何も言わずに終えたことにして静かに片付ける。
+fn handle_swipe(
+    direction: SwipeDirection,
+    screen: &mut Screen,
+    state: &mut AppState,
+    runtime: &mut Runtime,
+    auto_return_to_assistant: &mut bool,
+) {
+    if *state == AppState::Listening {
+        advance(state, runtime, AppEvent::SpeechNotDetected);
+    }
+
+    let event = screen_event_of(direction);
+    if event == ScreenEvent::SwipedToSettings {
+        // 自分で設定画面を開いたのだから、全モジュールが揃ったからと
+        // いって勝手に押し戻さない。
+        *auto_return_to_assistant = false;
+    }
+    *screen = screen::transition_screen(*screen, event);
+}
+
+/// 設定不備や失敗に入った瞬間、問答無用で設定画面へ切り替える。
+fn sync_screen_for_state(screen: &mut Screen, state: &AppState, auto_return_to_assistant: &mut bool) {
+    if matches!(state, AppState::SetupRequired | AppState::Recovering(_)) {
+        *screen = screen::transition_screen(*screen, ScreenEvent::ProblemDetected);
+        // 直しさえすれば自動的にアシスタント画面へ戻ってよい状況なので、
+        // 手動スワイプによる抑止は解除する。
+        *auto_return_to_assistant = true;
     }
 }
 
@@ -678,7 +903,8 @@ fn to_event(change: TouchChange) -> Option<AppEvent> {
             log::info!("さわった: ({}, {})", at.x, at.y);
             layout::is_talk_target(at).then_some(AppEvent::TalkPressed)
         }
-        TouchChange::Released => Some(AppEvent::TalkReleased),
+        TouchChange::Released(_) => Some(AppEvent::TalkReleased),
+        TouchChange::Moved(_) => None,
     }
 }
 

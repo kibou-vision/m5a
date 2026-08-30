@@ -12,6 +12,7 @@ m5a は M5Stack CoreS3 上で動く、子供用の音声チャットアシスタ
 | 全体の構造を把握したい | [設計](design.md) |
 | コードのどこを直すか探したい | [構成と責務](design/architecture.md) |
 | 画面や表情の挙動を知りたい | [顔と画面](spec/face.md) / [状態遷移](design/state.md) |
+| 設定画面・モジュールのステータス表示を知りたい | [設定画面](spec/settings.md) / [設定画面の設計](design/settings.md) |
 | 対話の流れを追いたい | [音声対話](spec/conversation.md) / [対話の流れ](design/conversation.md) |
 | 安全対策の考え方を知りたい | [ガードレール](spec/guardrail.md) |
 | 実機まわりでつまずいた | [CoreS3 の制約](design/hardware.md) |

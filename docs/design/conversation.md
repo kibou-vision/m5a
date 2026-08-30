@@ -58,19 +58,19 @@ sequenceDiagram
   end
 
   Note over Main: 実際に声が聞こえた
-  loop 声のあとの無音が3秒続くまで
+  loop 声のあとの無音が1.4秒続くまで
     Main->>Audio: encode_ulaw_block(録音)
     Main->>Proto: build_audio_append()
     Proto->>API: input_audio_buffer.append
     Main->>Main: TurnDetector::observe()
   end
 
-  alt 声のあとに無音が3秒続いた
+  alt 声のあとに無音が1.4秒続いた
     Main->>State: SpeechEnded
     State-->>Main: Thinking ＋ StopCapture, RequestResponse
     Main->>Proto: build_audio_commit() / build_response_create()
     Proto->>API: commit ＋ response.create
-  else 声が一度も聞こえないまま無音が3秒続いた
+  else 声が一度も聞こえないまま無音が1.4秒続いた
     Main->>State: SpeechNotDetected
     State-->>Main: Ready ＋ StopCapture
     Note over Main: 何も送らず終える

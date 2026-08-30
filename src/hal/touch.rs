@@ -8,10 +8,14 @@ use esp_idf_svc::sys::bsp;
 use m5a_core::layout::Point;
 
 /// 指の状態の変わり目。
+///
+/// スワイプの判定には離した瞬間の座標が要るため、押されたまま座標が
+/// 動いたことも `Moved` として拾い、`Released` にも最後の座標を持たせる。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TouchChange {
     Pressed(Point),
-    Released,
+    Moved(Point),
+    Released(Point),
 }
 
 /// 直前の状態を覚えて変わり目だけを返す。
@@ -19,6 +23,7 @@ pub enum TouchChange {
 pub struct TouchReader {
     device: *mut bsp::lv_indev_t,
     was_touching: bool,
+    last_point: Point,
 }
 
 impl TouchReader {
@@ -26,10 +31,11 @@ impl TouchReader {
         Self {
             device,
             was_touching: false,
+            last_point: Point::new(0, 0),
         }
     }
 
-    /// 1回読み取る。状態が変わっていなければ `None` を返す。
+    /// 1回読み取る。状態も座標も変わっていなければ `None` を返す。
     pub fn poll(&mut self) -> Option<TouchChange> {
         if self.device.is_null() {
             return None;
@@ -38,18 +44,29 @@ impl TouchReader {
         let touching = unsafe { bsp::lv_indev_get_state(self.device) }
             == bsp::lv_indev_state_t_LV_INDEV_STATE_PRESSED;
 
-        if touching == self.was_touching {
-            return None;
-        }
-        self.was_touching = touching;
-
         if !touching {
-            return Some(TouchChange::Released);
+            if !self.was_touching {
+                return None;
+            }
+            self.was_touching = false;
+            return Some(TouchChange::Released(self.last_point));
         }
 
         let mut at = bsp::lv_point_t { x: 0, y: 0 };
         unsafe { bsp::lv_indev_get_point(self.device, &mut at) };
+        let point = Point::new(at.x as i16, at.y as i16);
 
-        Some(TouchChange::Pressed(Point::new(at.x as i16, at.y as i16)))
+        let change = if !self.was_touching {
+            TouchChange::Pressed(point)
+        } else if point != self.last_point {
+            TouchChange::Moved(point)
+        } else {
+            return None;
+        };
+
+        self.was_touching = true;
+        self.last_point = point;
+
+        Some(change)
     }
 }
