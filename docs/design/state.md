@@ -35,6 +35,17 @@ stateDiagram-v2
   Recovering --> Connecting : RetryRequested<br/>／再接続
 
   SetupRequired --> [*] : 親が設定を直して再起動
+
+  Booting --> ShuttingDown : Idle
+  SetupRequired --> ShuttingDown : Idle
+  Connecting --> ShuttingDown : Idle
+  Opening --> ShuttingDown : Idle
+  Ready --> ShuttingDown : Idle
+  Listening --> ShuttingDown : Idle
+  Thinking --> ShuttingDown : Idle
+  Speaking --> ShuttingDown : Idle
+  Recovering --> ShuttingDown : Idle
+  ShuttingDown --> [*] : ／電源を落とす
 ```
 
 ## 設計上の判断
@@ -56,6 +67,14 @@ stateDiagram-v2
 **意味を持たないきっかけは捨てる** — たとえば `SetupRequired` での
 ボタン操作は無視する。取りこぼしても害がないため、エラーにしない。
 
+**無操作もどの状態からでも起こる** — `main.rs` はタッチ操作から
+3分（`IDLE_SHUTDOWN_MS`）経ったことを検知すると `Idle` を起こす。
+`Failed` と同様、対話の途中かどうかを問わず録音・再生の停止と
+セッションの切断を行ってから `ShuttingDown` へ移り、実機の電源を落とす。
+すでに `ShuttingDown` なら何もしない。置き忘れたまま電池を消耗させない
+ための仕組みで、目覚めは実機の電源ボタンに委ねる
+（[CoreS3 の制約](hardware.md)参照）。
+
 ## 依頼する処理
 
 遷移は次の処理を依頼する。実際に何をするかは実機側の担当。
@@ -68,6 +87,7 @@ stateDiagram-v2
 | `CancelResponse` | 生成中の応答を打ち切る |
 | `StartPlayback` / `StopPlayback` | 応答音声の再生 |
 | `ShowSetupGuide` / `ShowFailure` | 親への表示。`main.rs` は `AppState` が `SetupRequired` / `Recovering` に入った瞬間を見て、[画面遷移](#画面遷移)の `ProblemDetected` を起こす |
+| `PowerOff` | 実機の電源を落とす（`hal::board::power_off`） |
 
 ## 画面遷移
 

@@ -90,6 +90,8 @@ impl Expression {
             AppState::SetupRequired => Self::Trouble,
             AppState::Recovering(_) if failed_attempts < PATIENT_ATTEMPTS => Self::Waiting,
             AppState::Recovering(_) => Self::Trouble,
+            // 電源が切れる直前で、実際にはこの表情が描かれる前に画面が落ちる。
+            AppState::ShuttingDown => Self::Idle,
         }
     }
 
@@ -457,6 +459,7 @@ mod tests {
             (AppState::Thinking, Expression::Thinking),
             (AppState::Speaking, Expression::Talking),
             (AppState::SetupRequired, Expression::Trouble),
+            (AppState::ShuttingDown, Expression::Idle),
         ];
 
         for (state, expected) in pairs {

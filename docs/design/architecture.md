@@ -65,7 +65,7 @@ classDiagram
     Connecting / Opening
     Ready / Listening
     Thinking / Speaking
-    Recovering
+    Recovering / ShuttingDown
   }
 
   class Guardrail {

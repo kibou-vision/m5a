@@ -56,6 +56,10 @@ const SD_WRITE_HEADROOM: usize = 12 * 1_024;
 /// 子どもが操作しなくても自力で戻れるように、放っておいても再試行する。
 const RETRY_DELAY_MS: u64 = 3_000;
 
+/// この時間タッチ操作が無ければ電源を落とす。
+/// 置き忘れて電池を消耗させないための既定値。
+const IDLE_SHUTDOWN_MS: u64 = 3 * 60 * 1_000;
+
 fn main() -> Result<()> {
     esp_idf_svc::sys::link_patches();
     esp_idf_svc::log::EspLogger::initialize_default();
@@ -243,6 +247,12 @@ impl Runtime {
                 log::warn!("→ {}", failure.remedy());
                 self.record(Speaker::System, failure.describe());
                 None
+            }
+            AppAction::PowerOff => {
+                log::info!("しばらく操作が無かったため電源を落とします");
+                // 電源が切れる前に、たまっているログを失わないようにする。
+                self.flush_logs();
+                board::power_off();
             }
         }
     }
@@ -695,6 +705,8 @@ fn run(
     // 失敗からの回復時だけ働かせる。スワイプで自分から設定画面を
     // 開いたときにまで働くと、開いた直後に押し戻されて操作できない。
     let mut auto_return_to_assistant = true;
+    // 最後にタッチ操作があった時刻。これが `IDLE_SHUTDOWN_MS` 経つと電源を落とす。
+    let mut idle_since_ms = uptime_ms();
 
     runtime.open_audio();
     advance(&mut state, &mut runtime, startup);
@@ -715,6 +727,7 @@ fn run(
             settings_layout::lay_out_settings(&runtime.module_statuses, current_voice);
 
         if let Some(change) = touch.poll() {
+            idle_since_ms = now_ms;
             match change {
                 TouchChange::Pressed(at) => {
                     swipe_start = Some(at);
@@ -798,6 +811,10 @@ fn run(
         }
         if state == AppState::Ready {
             failed_attempts = 0;
+        }
+
+        if now_ms.saturating_sub(idle_since_ms) >= IDLE_SHUTDOWN_MS {
+            advance(&mut state, &mut runtime, AppEvent::Idle);
         }
 
         // 監視対象の全モジュールが整ったら、設定画面から自動的に戻る。

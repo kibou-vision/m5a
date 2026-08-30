@@ -26,6 +26,8 @@ pub enum AppState {
     Speaking,
     /// 失敗から復帰する前の待機。
     Recovering(Failure),
+    /// 無操作が続いたため、電源を落とす直前。
+    ShuttingDown,
 }
 
 /// 復帰可能な失敗の種類。
@@ -90,6 +92,8 @@ pub enum AppEvent {
     Failed(Failure),
     /// やり直す。
     RetryRequested,
+    /// 一定時間、操作が無かった。
+    Idle,
 }
 
 /// 状態遷移に伴ってハードウェア層に依頼する処理。
@@ -117,6 +121,8 @@ pub enum AppAction {
     ShowSetupGuide,
     /// 失敗の内容と対処法を表示する。
     ShowFailure(Failure),
+    /// 電源を切る。
+    PowerOff,
 }
 
 /// 遷移の結果。
@@ -153,6 +159,22 @@ pub fn transition(current: &AppState, event: AppEvent) -> Transition {
                 AppAction::ShowFailure(failure),
             ],
         );
+    }
+
+    // 無操作もどの状態からでも起こりうる。すでに電源を落とす途中なら何もしない。
+    if event == AppEvent::Idle {
+        return match current {
+            AppState::ShuttingDown => Transition::ignore(current),
+            _ => Transition::to(
+                AppState::ShuttingDown,
+                vec![
+                    AppAction::StopCapture,
+                    AppAction::StopPlayback,
+                    AppAction::CloseSession,
+                    AppAction::PowerOff,
+                ],
+            ),
+        };
     }
 
     match (current, event) {
@@ -370,6 +392,41 @@ mod tests {
                 .actions
                 .contains(&AppAction::ShowFailure(Failure::Session)));
         }
+    }
+
+    #[test]
+    fn idle_from_any_state_shuts_down() {
+        for start in [
+            AppState::Booting,
+            AppState::SetupRequired,
+            AppState::Connecting,
+            AppState::Ready,
+            AppState::Listening,
+            AppState::Thinking,
+            AppState::Speaking,
+            AppState::Recovering(Failure::Network),
+        ] {
+            let step = transition(&start, AppEvent::Idle);
+
+            assert_eq!(step.next, AppState::ShuttingDown);
+            assert_eq!(
+                step.actions,
+                vec![
+                    AppAction::StopCapture,
+                    AppAction::StopPlayback,
+                    AppAction::CloseSession,
+                    AppAction::PowerOff,
+                ]
+            );
+        }
+    }
+
+    #[test]
+    fn idle_while_already_shutting_down_is_ignored() {
+        let step = transition(&AppState::ShuttingDown, AppEvent::Idle);
+
+        assert_eq!(step.next, AppState::ShuttingDown);
+        assert!(step.actions.is_empty());
     }
 
     #[test]

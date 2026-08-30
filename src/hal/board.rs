@@ -62,6 +62,15 @@ pub fn touch_device() -> *mut bsp::lv_indev_t {
     unsafe { bsp::bsp_display_get_input_dev() }
 }
 
+/// 電源を落とす。
+///
+/// 起床要因をあえて設定しない。中途半端に自動で目覚める仕組みを持たせると、
+/// 切ったはずが動き続けているように見えてしまうため、復帰には
+/// 実機の電源ボタンでの再起動を必要とする形にする。
+pub fn power_off() -> ! {
+    unsafe { esp_idf_svc::sys::esp_deep_sleep_start() }
+}
+
 /// いま使える内部メモリの様子。
 ///
 /// LVGL の描画バッファ・Wi-Fi・音声が内部 DRAM を大きく使うため、
