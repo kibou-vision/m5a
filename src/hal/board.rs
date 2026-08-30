@@ -64,11 +64,19 @@ pub fn touch_device() -> *mut bsp::lv_indev_t {
 
 /// 電源を落とす。
 ///
+/// `esp_deep_sleep_start` は ESP32-S3 のチップだけを止め、AXP2101 が
+/// 供給し続けるバックライトには触れない。呼ぶ前にバックライトを消し
+/// パネルを休止させないと、CPU は眠っていても**画面は点いたまま**になる。
+///
 /// 起床要因をあえて設定しない。中途半端に自動で目覚める仕組みを持たせると、
 /// 切ったはずが動き続けているように見えてしまうため、復帰には
 /// 実機の電源ボタンでの再起動を必要とする形にする。
 pub fn power_off() -> ! {
-    unsafe { esp_idf_svc::sys::esp_deep_sleep_start() }
+    unsafe {
+        bsp::bsp_display_backlight_off();
+        bsp::bsp_display_enter_sleep();
+        esp_idf_svc::sys::esp_deep_sleep_start()
+    }
 }
 
 /// いま使える内部メモリの様子。
