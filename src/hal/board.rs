@@ -62,21 +62,30 @@ pub fn touch_device() -> *mut bsp::lv_indev_t {
     unsafe { bsp::bsp_display_get_input_dev() }
 }
 
+/// AXP2101 の I2C アドレス。内部 I2C バス（`init_bus()` が立ち上げる）に
+/// BSP と相乗りする。同じアドレスに複数の `i2c_master_dev_handle_t` を
+/// 持つこと自体はドライバ側で禁止されていない
+/// （`esp_driver_i2c` は登録済みアドレスの重複を検査しない）。
+const AXP2101_I2C_ADDR: u16 = 0x34;
+/// AXP2101 の「共通設定」レジスタ。bit0 に1を立てると、RTC用の電源
+/// （VRTC）を除くすべてのレールを切る（AXP2101 データシート、および
+/// 実機で使われている `lewisxhe/XPowersLib` の `shutdown()` 実装を参照）。
+const AXP2101_REG_COMMON_CONFIG: u8 = 0x10;
+const AXP2101_SOFT_OFF_BIT: u8 = 0x01;
+
 /// 電源を落とす。
 ///
-/// `esp_deep_sleep_start` は ESP32-S3 のチップだけを止め、AXP2101 が
-/// 供給し続けるバックライトには触れない。呼ぶ前にバックライトを消し
-/// パネルを休止させないと、CPU は眠っていても**画面は点いたまま**になる。
+/// `esp_deep_sleep_start()` だけでは ESP32-S3 のチップしか止まらず、
+/// バックライトや周辺の電源レールは AXP2101 が給電し続けたままになる
+/// （画面が点いたまま、実機によっては何かの拍子に起き上がって
+/// 再起動したように見える不具合を確認済み）。そこで AXP2101 自身に
+/// [`AXP2101_REG_COMMON_CONFIG`] のシャットダウンビットを立てさせ、
+/// VRTC 以外のレール（ESP32-S3 本体の電源も含む）を実際に切る。
+/// 復帰には実機の電源ボタンでの起動が要る。
 ///
-/// `bsp_display_enter_sleep()` は LVGL を介さず `esp_lcd_panel_disp_on_off`
-/// を直接呼んでパネルへコマンドを送る。LVGL の描画タスクが同じ SPI バスへ
-/// 同時にフレームを流している最中にこれを行うと衝突し、**電源を切ったはずが
-/// 再起動する**形で壊れる（実機で確認済み）。他の画面操作と同じく
-/// `DisplayLock` で描画タスクを止めてから呼ぶ。
-///
-/// 起床要因をあえて設定しない。中途半端に自動で目覚める仕組みを持たせると、
-/// 切ったはずが動き続けているように見えてしまうため、復帰には
-/// 実機の電源ボタンでの再起動を必要とする形にする。
+/// AXP2101 と通信できなかった場合だけ、保険として
+/// `esp_deep_sleep_start()` にも落とす（起床要因は設定しないため、
+/// 通常は電源ボタンでの再起動が要る点は変わらない）。
 pub fn power_off() -> ! {
     unsafe {
         bsp::bsp_display_backlight_off();
@@ -84,8 +93,55 @@ pub fn power_off() -> ! {
             let _lock = DisplayLock::acquire();
             bsp::bsp_display_enter_sleep();
         }
-        esp_idf_svc::sys::esp_deep_sleep_start()
     }
+
+    if let Err(error) = axp2101_shutdown() {
+        log::warn!("AXP2101に電源を切らせられません（{error:#}）。deep sleepで代替します");
+    }
+
+    // AXP2101 のシャットダウンが成功していれば、この呼び出しへ実際に
+    // たどり着く前に電源が切れる。ここに来るとすれば、切れるまでの
+    // 一瞬の待ちか、AXP2101と通信できなかったときの保険。
+    unsafe { esp_idf_svc::sys::esp_deep_sleep_start() }
+}
+
+/// AXP2101 自身にシャットダウンさせる。
+///
+/// BSP は AXP2101 用の取っ手を内部（`bsp_feature_en.c`）に静的に持つが
+/// 外へは公開していないため、同じアドレスへ自分の取っ手を新たに作って使う。
+fn axp2101_shutdown() -> Result<()> {
+    let bus = unsafe { bsp::bsp_i2c_get_handle() };
+
+    let config = bsp::i2c_device_config_t {
+        dev_addr_length: bsp::i2c_addr_bit_len_t_I2C_ADDR_BIT_LEN_7,
+        device_address: AXP2101_I2C_ADDR,
+        scl_speed_hz: 100_000,
+        scl_wait_us: 0,
+        flags: Default::default(),
+    };
+    let mut device: bsp::i2c_master_dev_handle_t = std::ptr::null_mut();
+    esp!(unsafe { bsp::i2c_master_bus_add_device(bus, &config, &mut device) })
+        .context("AXP2101を掴めません")?;
+
+    // 他のビットを保ったまま立てるため、読んでから書き戻す。
+    let mut current = [0_u8; 1];
+    esp!(unsafe {
+        bsp::i2c_master_transmit_receive(
+            device,
+            [AXP2101_REG_COMMON_CONFIG].as_ptr(),
+            1,
+            current.as_mut_ptr(),
+            1,
+            1_000,
+        )
+    })
+    .context("AXP2101のレジスタを読めません")?;
+
+    let updated = [AXP2101_REG_COMMON_CONFIG, current[0] | AXP2101_SOFT_OFF_BIT];
+    esp!(unsafe { bsp::i2c_master_transmit(device, updated.as_ptr(), updated.len(), 1_000) })
+        .context("AXP2101に電源を切らせられません")?;
+
+    Ok(())
 }
 
 /// いま使える内部メモリの様子。
