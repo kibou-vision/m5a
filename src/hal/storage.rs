@@ -5,6 +5,11 @@
 //! カードを挿したまま画面を使い続けられる（[CoreS3 の制約](../../docs/design/hardware.md)
 //! 参照）。設定画面のスライダーのように、画面を表示したまま実行中に
 //! いつでも書き戻せる。
+//!
+//! 電源が切れる経路は自動シャットダウン（`hal::board::power_off()`。
+//! アンマウントしてから切る）だけとは限らず、給電を直接断たれることも
+//! ふつうにある。そちらは事前に何も呼べないため、書き込みのたびに
+//! `File::sync_all()` でその場から確実にディスクへ落とす。
 
 use std::fs;
 use std::io::Write as _;
@@ -45,7 +50,9 @@ impl Storage for SdStorage {
     }
 
     fn write_text(&mut self, path: &str, contents: &str) -> Result<(), StorageError> {
-        fs::write(Self::absolute(path), contents).map_err(to_storage_error)
+        let mut file = fs::File::create(Self::absolute(path)).map_err(to_storage_error)?;
+        file.write_all(contents.as_bytes()).map_err(to_storage_error)?;
+        file.sync_all().map_err(to_storage_error)
     }
 
     fn append_text(&mut self, path: &str, contents: &str) -> Result<(), StorageError> {
@@ -55,7 +62,8 @@ impl Storage for SdStorage {
             .open(Self::absolute(path))
             .map_err(to_storage_error)?;
 
-        file.write_all(contents.as_bytes()).map_err(to_storage_error)
+        file.write_all(contents.as_bytes()).map_err(to_storage_error)?;
+        file.sync_all().map_err(to_storage_error)
     }
 
     fn create_dir(&mut self, path: &str) -> Result<(), StorageError> {
