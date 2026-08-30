@@ -48,6 +48,9 @@ const NOD_PULSE_MS: u64 = 200;
 /// 二連続でうなずくときの、1回目と2回目の間隔。
 const NOD_GAP_MS: u64 = 120;
 
+/// おはなしボタンの表示・非表示にかける時間。
+const BUTTON_TRANSITION_MS: u64 = 200;
+
 /// 待機中の流し目の向き。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Glance {
@@ -141,6 +144,10 @@ pub struct FaceFrame {
     /// うなずきの深さ。0 が正面、100 が最も下を向いた状態。
     /// 目（白目と瞳）を丸ごと下へ動かすのに使う。
     pub nod: u8,
+    /// おはなしボタンの大きさの倍率。0 が中央につぶれて消えた状態、
+    /// 100 が全開。録音中（聞いている間）は0へ、それ以外は100へ
+    /// 200ms かけて滑らかに変わる。
+    pub button_scale: u8,
 }
 
 /// 時刻を与えると顔のかたちを返す。
@@ -166,6 +173,13 @@ pub struct FaceAnimator {
     /// うなずきの予定。始まった時刻と、残りの回数（1 か 2）。
     nod_started_at_ms: Option<u64>,
     nod_pulses_remaining: u8,
+    /// おはなしボタンがいま向かっている先（真なら全開、偽なら中央へ収縮）。
+    button_target_visible: bool,
+    /// 直近にボタンの向き先が変わった時刻と、そのときの倍率。
+    /// 切り替えの途中で逆向きの指示が来ても、その場の大きさから
+    /// 続けて逆再生できるように覚えておく。
+    button_transition_started_at_ms: u64,
+    button_transition_start_scale: u8,
     /// まばたき間隔などを散らすための擬似乱数の種。
     seed: u32,
 }
@@ -193,6 +207,10 @@ impl FaceAnimator {
             idle_glance_hold_ms: IDLE_GLANCE_TRANSITION_MS * 2 + IDLE_GLANCE_PLATEAU_MIN_MS,
             nod_started_at_ms: None,
             nod_pulses_remaining: 0,
+            // 最初の一コマから全開で始める。
+            button_target_visible: true,
+            button_transition_started_at_ms: 0,
+            button_transition_start_scale: 100,
             seed: 0x5A5A_1234,
         }
     }
@@ -221,6 +239,7 @@ impl FaceAnimator {
         self.advance_blink(now_ms);
         self.advance_idle_glance(now_ms);
         self.advance_nod(now_ms);
+        self.advance_button(now_ms);
 
         FaceFrame {
             expression: self.expression,
@@ -230,6 +249,7 @@ impl FaceAnimator {
             gaze_x: self.gaze_x_at(now_ms),
             gaze_y: self.gaze_y_at(now_ms),
             nod: self.nod_at(now_ms),
+            button_scale: self.button_scale_at(now_ms),
         }
     }
 
@@ -393,6 +413,32 @@ impl FaceAnimator {
     fn roll_double_nod(&mut self) -> bool {
         self.seed = self.seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
         (self.seed >> 24) % 2 == 0
+    }
+
+    /// 聞いている間だけボタンを隠す向きに切り替える。押した瞬間
+    /// （Listeningへ移った瞬間）に隠し始め、録音が終わった瞬間
+    /// （Listeningを抜けた瞬間）に見せ始める。
+    fn advance_button(&mut self, now_ms: u64) {
+        let target_visible = self.expression != Expression::Listening;
+        if target_visible == self.button_target_visible {
+            return;
+        }
+
+        // 向きが変わった。今の大きさから逆方向へ続けて滑らかに動くよう、
+        // 現在の倍率をその場で覚えてから向き先を切り替える。
+        self.button_transition_start_scale = self.button_scale_at(now_ms);
+        self.button_transition_started_at_ms = now_ms;
+        self.button_target_visible = target_visible;
+    }
+
+    /// ボタンの大きさの倍率。0が中央につぶれた状態、100が全開。
+    fn button_scale_at(&self, now_ms: u64) -> u8 {
+        let elapsed = now_ms.saturating_sub(self.button_transition_started_at_ms) as f32;
+        let ratio = (elapsed / BUTTON_TRANSITION_MS as f32).clamp(0.0, 1.0);
+        let target = if self.button_target_visible { 100.0 } else { 0.0 };
+        let start = f32::from(self.button_transition_start_scale);
+
+        (start + (target - start) * ratio).round() as u8
     }
 
     /// うなずきの深さ。聞いているときだけ動き、下を向いてまた正面へ戻る
@@ -824,6 +870,75 @@ mod tests {
 
         assert!(saw_single, "1回だけのうなずきも起きるはず");
         assert!(saw_double, "2回連続のうなずきも起きるはず");
+    }
+
+    #[test]
+    fn button_starts_fully_visible() {
+        let mut animator = FaceAnimator::new();
+        animator.set_expression(Expression::Idle);
+
+        assert_eq!(animator.frame_at(0).button_scale, 100);
+    }
+
+    #[test]
+    fn button_shrinks_to_the_centre_once_listening_begins() {
+        let mut animator = FaceAnimator::new();
+        animator.set_expression(Expression::Idle);
+        animator.frame_at(0);
+
+        animator.set_expression(Expression::Listening);
+        assert_eq!(animator.frame_at(0).button_scale, 100, "切り替えた瞬間はまだ全開のはず");
+        let midway = animator.frame_at(BUTTON_TRANSITION_MS / 2).button_scale;
+        assert!(
+            midway > 0 && midway < 100,
+            "半分の時点では中間の大きさのはず: {midway}"
+        );
+        assert_eq!(
+            animator.frame_at(BUTTON_TRANSITION_MS).button_scale,
+            0,
+            "200msで完全に隠れるはず"
+        );
+    }
+
+    #[test]
+    fn button_grows_back_once_listening_ends() {
+        let mut animator = FaceAnimator::new();
+        animator.set_expression(Expression::Listening);
+        animator.frame_at(0);
+        assert_eq!(animator.frame_at(BUTTON_TRANSITION_MS).button_scale, 0);
+
+        animator.set_expression(Expression::Idle);
+        assert_eq!(
+            animator.frame_at(BUTTON_TRANSITION_MS).button_scale,
+            0,
+            "切り替えた瞬間はまだ隠れたままのはず"
+        );
+        assert_eq!(
+            animator.frame_at(BUTTON_TRANSITION_MS * 2).button_scale,
+            100,
+            "そこから200msで全開に戻るはず"
+        );
+    }
+
+    #[test]
+    fn button_reverses_smoothly_when_interrupted_midway() {
+        let mut animator = FaceAnimator::new();
+        animator.set_expression(Expression::Idle);
+        animator.frame_at(0);
+
+        // 隠れる向きへ切り替え、半分だけ隠れたところの大きさを覚える。
+        animator.set_expression(Expression::Listening);
+        animator.frame_at(0);
+        let midway = animator.frame_at(BUTTON_TRANSITION_MS / 2).button_scale;
+        assert!(midway > 0 && midway < 100, "半分の時点は中間の大きさのはず: {midway}");
+
+        // その瞬間に録音が終わったことにして、逆向きへ切り替える。
+        animator.set_expression(Expression::Idle);
+        let just_after_reversal = animator.frame_at(BUTTON_TRANSITION_MS / 2).button_scale;
+
+        // 逆再生の始まりは、隠れかけていた大きさから続くはずで、
+        // いきなり全開（100）へ飛んではいけない。
+        assert_eq!(just_after_reversal, midway, "逆再生はその場の大きさから始まるはず");
     }
 
     #[test]

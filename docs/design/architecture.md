@@ -115,6 +115,7 @@ classDiagram
     +gaze_x: i8
     +gaze_y: i8
     +nod: u8
+    +button_scale: u8
   }
 
   class Screen {

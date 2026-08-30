@@ -254,12 +254,24 @@ pub fn lay_out_face(frame: &FaceFrame) -> FaceLayout {
         brows: lay_out_brows(frame.expression),
         button: Rect::around(
             TALK_BUTTON_CENTER,
-            TALK_BUTTON_RADIUS as u16 * 2,
-            TALK_BUTTON_RADIUS as u16 * 2,
+            scale(TALK_BUTTON_RADIUS as u16 * 2, frame.button_scale),
+            scale(TALK_BUTTON_RADIUS as u16 * 2, frame.button_scale),
         ),
-        microphone: lay_out_microphone(),
+        microphone: lay_out_microphone(frame.button_scale),
         button_color: button_color_of(frame.expression),
     }
+}
+
+/// `frame.button_scale`（0〜100）を長さへ掛ける。ボタンとマイクの絵を
+/// 同じ倍率で縮めることで、中央（`TALK_BUTTON_CENTER`）へ向かって
+/// つぶれていくように見せる。
+fn scale(value: u16, percent: u8) -> u16 {
+    value * u16::from(percent) / 100
+}
+
+/// [`scale`] の符号あり版。マイクの絵の各部を積む間隔にも使う。
+fn scale_signed(value: i16, percent: u8) -> i16 {
+    value * i16::from(percent) / 100
 }
 
 /// その位置へのふれ方が、おはなしの合図になるか。
@@ -272,30 +284,44 @@ pub fn is_talk_target(at: Point) -> bool {
 }
 
 /// マイクの絵の置き場所。ボタンの中心を基準に、上から順に積む。
-fn lay_out_microphone() -> Microphone {
-    let head_center = Point::new(TALK_BUTTON_CENTER.x, TALK_BUTTON_CENTER.y - MIC_HEAD_LIFT);
+///
+/// `scale`（0〜100）はボタンと同じ倍率で、0のときは各部が
+/// `TALK_BUTTON_CENTER` の一点へつぶれる（ボタンが中央へ縮む
+/// アニメーションに合わせるため）。
+fn lay_out_microphone(button_scale: u8) -> Microphone {
+    let head_lift = scale_signed(MIC_HEAD_LIFT, button_scale);
+    let head_center = Point::new(TALK_BUTTON_CENTER.x, TALK_BUTTON_CENTER.y - head_lift);
+    let head_width = scale(MIC_HEAD_WIDTH, button_scale);
+    let head_height = scale(MIC_HEAD_HEIGHT, button_scale);
+
+    let cradle_lift = scale_signed(MIC_CRADLE_LIFT, button_scale);
+    let cradle_size = scale(MIC_CRADLE_SIZE, button_scale);
     let cradle = Rect::around(
-        Point::new(TALK_BUTTON_CENTER.x, TALK_BUTTON_CENTER.y - MIC_CRADLE_LIFT),
-        MIC_CRADLE_SIZE,
-        MIC_CRADLE_SIZE,
+        Point::new(TALK_BUTTON_CENTER.x, TALK_BUTTON_CENTER.y - cradle_lift),
+        cradle_size,
+        cradle_size,
     );
 
     // 前の部品の下端から積む。中心からの計算を重ねると丸めでずれる。
+    let stem_width = scale(MIC_STEM_WIDTH, button_scale);
+    let stem_height = scale(MIC_STEM_HEIGHT, button_scale);
     let stem = Rect {
-        x: TALK_BUTTON_CENTER.x - MIC_STEM_WIDTH as i16 / 2,
+        x: TALK_BUTTON_CENTER.x - stem_width as i16 / 2,
         y: cradle.bottom(),
-        width: MIC_STEM_WIDTH,
-        height: MIC_STEM_HEIGHT,
+        width: stem_width,
+        height: stem_height,
     };
+    let base_width = scale(MIC_BASE_WIDTH, button_scale);
+    let base_height = scale(MIC_BASE_HEIGHT, button_scale);
     let base = Rect {
-        x: TALK_BUTTON_CENTER.x - MIC_BASE_WIDTH as i16 / 2,
+        x: TALK_BUTTON_CENTER.x - base_width as i16 / 2,
         y: stem.bottom(),
-        width: MIC_BASE_WIDTH,
-        height: MIC_BASE_HEIGHT,
+        width: base_width,
+        height: base_height,
     };
 
     Microphone {
-        head: Rect::around(head_center, MIC_HEAD_WIDTH, MIC_HEAD_HEIGHT),
+        head: Rect::around(head_center, head_width, head_height),
         cradle,
         stem,
         base,
@@ -424,6 +450,7 @@ mod tests {
             gaze_x: 0,
             gaze_y: 0,
             nod: 0,
+            button_scale: 100,
         }
     }
 
@@ -600,6 +627,68 @@ mod tests {
         assert!(layout.button.y > SCREEN_HEIGHT / 2);
         assert!(layout.button.right() <= SCREEN_WIDTH);
         assert!(layout.button.bottom() <= SCREEN_HEIGHT);
+    }
+
+    #[test]
+    fn button_scale_of_zero_collapses_the_button_to_a_point_at_its_centre() {
+        let layout = lay_out_face(&FaceFrame {
+            button_scale: 0,
+            ..frame(Expression::Idle, 100)
+        });
+
+        assert_eq!(layout.button.width, 0);
+        assert_eq!(layout.button.height, 0);
+        assert_eq!(layout.button.x, TALK_BUTTON_CENTER.x);
+        assert_eq!(layout.button.y, TALK_BUTTON_CENTER.y);
+    }
+
+    #[test]
+    fn button_scale_of_100_matches_the_full_size_button() {
+        let full = lay_out_face(&frame(Expression::Idle, 100)).button;
+        let scaled = lay_out_face(&FaceFrame {
+            button_scale: 100,
+            ..frame(Expression::Idle, 100)
+        })
+        .button;
+
+        assert_eq!(full, scaled);
+    }
+
+    #[test]
+    fn button_shrinks_smoothly_between_the_extremes() {
+        let small = lay_out_face(&FaceFrame {
+            button_scale: 25,
+            ..frame(Expression::Idle, 100)
+        })
+        .button;
+        let large = lay_out_face(&FaceFrame {
+            button_scale: 75,
+            ..frame(Expression::Idle, 100)
+        })
+        .button;
+
+        assert!(small.width < large.width, "25%は75%より小さいはず");
+        // 中心はどちらも同じ（つぶれていく先はボタンの中心）。
+        for button in [small, large] {
+            assert_eq!(button.x + button.width as i16 / 2, TALK_BUTTON_CENTER.x);
+            assert_eq!(button.y + button.height as i16 / 2, TALK_BUTTON_CENTER.y);
+        }
+    }
+
+    #[test]
+    fn microphone_collapses_to_the_button_centre_along_with_the_button() {
+        let mic = lay_out_face(&FaceFrame {
+            button_scale: 0,
+            ..frame(Expression::Idle, 100)
+        })
+        .microphone;
+
+        for part in [mic.head, mic.cradle, mic.stem, mic.base] {
+            assert_eq!(part.width, 0, "{part:?}");
+            assert_eq!(part.height, 0, "{part:?}");
+            assert_eq!(part.x, TALK_BUTTON_CENTER.x, "{part:?}");
+            assert_eq!(part.y, TALK_BUTTON_CENTER.y, "{part:?}");
+        }
     }
 
     #[test]
