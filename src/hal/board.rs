@@ -57,17 +57,6 @@ pub fn mount_sd_card() -> Result<()> {
     Ok(())
 }
 
-/// SD カードを安全に取り外せる状態にする。
-///
-/// `fs::write` が成功を返しても、SDカード自身の書き込みキャッシュに
-/// データが残ったままのことがある。電源を断つ前にアンマウントして
-/// ファイルシステムをきちんと同期させないと、直前に保存したはずの
-/// 設定やログが失われる（実機で確認済み。`power_off()` 参照）。
-pub fn unmount_sd_card() -> Result<()> {
-    esp!(unsafe { bsp::bsp_sdcard_unmount() }).context("SDカードを片付けられません")?;
-    Ok(())
-}
-
 /// タッチの入力装置。LVGL が読み取りを担う。
 pub fn touch_device() -> *mut bsp::lv_indev_t {
     unsafe { bsp::bsp_display_get_input_dev() }
@@ -89,15 +78,17 @@ pub fn touch_device() -> *mut bsp::lv_indev_t {
 /// 電源を切る方式は `esp_deep_sleep_start()` による代用とする。起床要因は
 /// 一切設定しないため、目覚めは実機の電源ボタンによる起動に任せる。
 ///
-/// deep sleep 中も設定やログの保存が失われないよう、眠る前に必ず
-/// [`unmount_sd_card()`] でファイルシステムを同期させる
-/// （実機で、明るさの保存が次回起動に反映されない不具合として確認済み）。
+/// `bsp_sdcard_unmount()` はここでは呼ばない。LCDパネルと同じ SPI バス
+/// （SPI3_HOST）を使っているため、パネルの SPI デバイスが生きたまま
+/// バスを `bsp_spi_deinit()` で丸ごと解放しようとすると
+/// `spi_bus_free` が `ESP_ERR_INVALID_STATE`（CSが残っている）で失敗し、
+/// これも `ESP_ERROR_CHECK` で無条件に `abort()` する（実機で確認済み。
+/// 詳細は [CoreS3 の制約](../../docs/design/hardware.md) 参照）。設定や
+/// ログの保存は `hal::storage::SdStorage` が書き込むたびに
+/// `File::sync_all()` で同期しているため、ここで改めてアンマウントする
+/// 必要はない。
 pub fn power_off() -> ! {
     unsafe { bsp::bsp_display_backlight_off() };
-
-    if let Err(error) = unmount_sd_card() {
-        log::warn!("SDカードを同期できません（{error:#}）。設定の保存が失われる恐れがあります");
-    }
 
     unsafe { esp_idf_svc::sys::esp_deep_sleep_start() }
 }
