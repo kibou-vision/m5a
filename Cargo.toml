@@ -22,10 +22,32 @@ esp-idf-hal = { git = "https://github.com/esp-rs/esp-idf-hal.git" }
 esp-idf-svc = { git = "https://github.com/esp-rs/esp-idf-svc.git" }
 
 [dependencies]
+m5a-core = { path = "core" }
 log = "0.4"
+anyhow = "1"
+embedded-svc = { version = "0.29", default-features = false }
+mipidsi = "0.10"
+embedded-graphics = "0.8"
+embedded-hal = "1"
 esp-idf-svc = { version = "0.52.1", features = ["critical-section", "embassy-time-driver", "embassy-sync"] }
 # Remove `generic-queue-8` if you plan to use `embassy-time` WITH `embassy-executor`
 embassy-time = { version = "0.5", features = ["generic-queue-8"] }
 
 [build-dependencies]
 embuild = "0.33"
+
+# CoreS3 の公式 BSP を取り込む。電源IC・LCD・タッチ・SD・音声コーデックと
+# LVGL の結線をまとめて引き受けてくれる。LCD の DC と microSD の MISO が
+# 同じ端子を分け合う問題も BSP 側で処理される。
+[[package.metadata.esp-idf-sys.extra_components]]
+remote_component = { name = "espressif/m5stack_core_s3", version = "^4.0" }
+bindings_header = "bindings_bsp.h"
+bindings_module = "bsp"
+
+# Realtime API へ繋ぐ WebSocket クライアント。
+# esp-idf-svc の ws::client はこのコンポーネントがある時だけ有効になる。
+[[package.metadata.esp-idf-sys.extra_components]]
+remote_component = { name = "espressif/esp_websocket_client", version = "^1.5" }
+
+[workspace]
+members = ["core"]

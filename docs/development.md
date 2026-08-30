@@ -44,6 +44,21 @@
    cargo run
    ```
 
+   M5Stack を USB で接続すると `/dev/cu.usbmodem*` が現れる。ポートを明示する
+   場合は次のようにする。
+
+   ```sh
+   espflash flash --port /dev/cu.usbmodem101 --monitor target/xtensa-esp32s3-espidf/debug/m5a
+   ```
+
+5. コア層の単体テストを実行する
+
+   ```sh
+   cargo test-core
+   ```
+
+   詳細は [テスト方針](testing.md) を参照。
+
 ## C言語プロジェクト（Rust 実装が存在しない場合のフォールバック）
 
 ### セットアップ手順（macOS）
