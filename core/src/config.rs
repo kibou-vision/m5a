@@ -444,11 +444,7 @@ fn save_toml_line<S: Storage>(
         .read_text(CONFIG_PATH)
         .map_err(ConfigError::Unreadable)?;
 
-    let updated = replace_toml_line(&source, section, key, new_line).ok_or_else(|| {
-        ConfigError::Malformed {
-            detail: format!("[{section}] の {key} の行が見つかりません"),
-        }
-    })?;
+    let updated = replace_toml_line(&source, section, key, new_line);
 
     storage
         .write_text(CONFIG_PATH, &updated)
@@ -464,20 +460,34 @@ fn save_toml_line<S: Storage>(
     Ok(())
 }
 
-/// 指定したセクション内の `key = ...` 行だけを置き換える。
-/// 他の項目・コメント・空行はそのまま残す。
-fn replace_toml_line(source: &str, section: &str, key: &str, new_line: &str) -> Option<String> {
+/// 指定したセクション内の `key = ...` 行を書き換える。他の項目・コメント・
+/// 空行はそのまま残す。この機能を追加する前に作られた `config.toml` には
+/// `[audio]` のようなセクション自体が無いことがあるため、行が無ければ
+/// セクション内に足し、セクション自体が無ければ末尾に新設する
+/// （行が見つからないと諦めて失敗すると、スライダーで値を変えても
+/// 一切保存できない端末が生まれてしまう）。
+fn replace_toml_line(source: &str, section: &str, key: &str, new_line: &str) -> String {
     let target_section = format!("[{section}]");
     let mut in_target_section = false;
+    let mut section_found = false;
     let mut replaced = false;
     let mut lines: Vec<String> = Vec::new();
 
     for line in source.lines() {
         let trimmed = line.trim();
+        let is_header = trimmed.starts_with('[') && trimmed.ends_with(']');
 
-        if trimmed.starts_with('[') && trimmed.ends_with(']') {
+        // 対象セクションのまま次のセクションに入る＝行が無いまま
+        // セクションが終わったので、閉じる前にここへ足す。
+        if is_header && in_target_section && !replaced {
+            lines.push(new_line.to_string());
+            replaced = true;
+        }
+
+        if is_header {
             in_target_section = trimmed == target_section;
-        } else if in_target_section && trimmed.starts_with(key) {
+            section_found |= in_target_section;
+        } else if in_target_section && !replaced && trimmed.starts_with(key) {
             let after_key = trimmed[key.len()..].trim_start();
             if after_key.starts_with('=') {
                 lines.push(new_line.to_string());
@@ -489,15 +499,20 @@ fn replace_toml_line(source: &str, section: &str, key: &str, new_line: &str) -> 
         lines.push(line.to_string());
     }
 
-    if !replaced {
-        return None;
+    // ファイルの末尾まで対象セクションのままだった場合。
+    if in_target_section && !replaced {
+        lines.push(new_line.to_string());
+    }
+
+    if !section_found {
+        lines.push(String::new());
+        lines.push(target_section);
+        lines.push(new_line.to_string());
     }
 
     let mut result = lines.join("\n");
-    if source.ends_with('\n') {
-        result.push('\n');
-    }
-    Some(result)
+    result.push('\n');
+    result
 }
 
 #[cfg(test)]
@@ -706,12 +721,15 @@ mod tests {
     }
 
     #[test]
-    fn save_voice_fails_when_voice_line_is_missing() {
+    fn save_voice_appends_the_section_when_entirely_missing() {
+        // この機能を追加する前に作られた config.toml を想定する。
         let mut storage = MemoryStorage::with_file(CONFIG_PATH, "[child]\nname = \"はると\"\n");
 
-        let result = save_voice(&mut storage, "cedar");
+        save_voice(&mut storage, "cedar").expect("セクションが無くても保存できるはず");
 
-        assert!(matches!(result, Err(ConfigError::Malformed { .. })));
+        let stored = storage.peek(CONFIG_PATH).expect("書き戻されているはず");
+        assert!(stored.contains("[openai]"));
+        assert!(stored.contains("voice = \"cedar\""));
     }
 
     #[test]
@@ -760,12 +778,32 @@ mod tests {
     }
 
     #[test]
-    fn save_speaker_volume_fails_when_audio_section_is_missing() {
+    fn save_speaker_volume_appends_the_section_when_missing() {
+        // この機能を追加する前に作られた config.toml を想定する。
         let mut storage = MemoryStorage::with_file(CONFIG_PATH, "[child]\nname = \"はると\"\n");
 
-        let result = save_speaker_volume(&mut storage, 50);
+        save_speaker_volume(&mut storage, 50).expect("セクションが無くても保存できるはず");
 
-        assert!(matches!(result, Err(ConfigError::Malformed { .. })));
+        let stored = storage.peek(CONFIG_PATH).expect("書き戻されているはず");
+        assert!(stored.contains("[audio]"));
+        assert!(stored.contains("speaker_volume = 50"));
+        // 元からあった項目は残っている。
+        assert!(stored.contains("name = \"はると\""));
+    }
+
+    #[test]
+    fn replace_toml_line_inserts_into_an_existing_section_missing_the_key() {
+        let source = "[audio]\nspeaker_volume = 80\n[wifi]\nssid = \"x\"\n";
+
+        let updated = replace_toml_line(source, "audio", "mic_gain_db", "mic_gain_db = 20");
+
+        assert!(updated.contains("speaker_volume = 80"));
+        assert!(updated.contains("mic_gain_db = 20"));
+        assert!(updated.contains("[wifi]"));
+        // 挿入した行は [wifi] より前、対象セクションの中にあること。
+        let mic_pos = updated.find("mic_gain_db = 20").unwrap();
+        let wifi_pos = updated.find("[wifi]").unwrap();
+        assert!(mic_pos < wifi_pos);
     }
 
     #[test]
