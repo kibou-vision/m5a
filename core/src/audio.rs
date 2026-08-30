@@ -15,6 +15,36 @@ const SEGMENT_ENDS: [i32; 8] = [0x3F, 0x7F, 0xFF, 0x1FF, 0x3FF, 0x7FF, 0xFFF, 0x
 /// 会話時の実効値で頭打ちになるようにして口の動きを見えやすくする。
 const MOUTH_FULL_SCALE_RMS: i64 = 6_000;
 
+/// マイク感度スライダーが100のときに、固定したハード利得へ上乗せする量（dB）。
+const MIC_GAIN_RANGE_DB: f32 = 12.0;
+
+/// スピーカー音量スライダー（0〜100）を、波形へ掛ける倍率に変換する。
+///
+/// ハードの音量は常に100%に固定してある（`hal::audio` 側の定数）ため、
+/// 50 が「ハードの音量そのものを100%にしていた頃の最大音量」に相当する
+/// 基準点。100 まで上げるとその約2倍（+6dB相当）まで、デジタルゲインだけで
+/// 底上げできる。
+pub fn speaker_gain_multiplier(percent: u8) -> f32 {
+    f32::from(percent) / 50.0
+}
+
+/// マイク感度スライダー（0〜100）を、固定したハード利得に上乗せする
+/// 倍率に変換する。0 で上乗せ無し（ハードの固定値そのまま）、100 で
+/// +12dB（[`MIC_GAIN_RANGE_DB`]）まで上乗せする。
+pub fn mic_gain_multiplier(percent: u8) -> f32 {
+    let extra_db = f32::from(percent) * MIC_GAIN_RANGE_DB / 100.0;
+    10f32.powf(extra_db / 20.0)
+}
+
+/// 波形サンプルへ倍率を掛ける。signed 16bit で表せない分は振り切れず、
+/// 上限・下限で頭打ち（クリップ）にする。
+pub fn apply_gain(samples: &mut [i16], gain: f32) {
+    for sample in samples.iter_mut() {
+        let scaled = f32::from(*sample) * gain;
+        *sample = scaled.clamp(f32::from(i16::MIN), f32::from(i16::MAX)) as i16;
+    }
+}
+
 /// PCM16 の1標本を μ-law 1バイトに変換する。
 pub fn encode_ulaw(sample: i16) -> u8 {
     let mut magnitude = i32::from(sample) >> 2;
@@ -233,5 +263,60 @@ mod tests {
     #[test]
     fn level_of_an_empty_block_is_zero() {
         assert_eq!(measure_level(&[]), 0);
+    }
+
+    #[test]
+    fn speaker_gain_of_50_percent_is_unity() {
+        assert_eq!(speaker_gain_multiplier(50), 1.0);
+    }
+
+    #[test]
+    fn speaker_gain_at_the_extremes() {
+        assert_eq!(speaker_gain_multiplier(0), 0.0);
+        assert_eq!(speaker_gain_multiplier(100), 2.0);
+    }
+
+    #[test]
+    fn mic_gain_of_zero_percent_adds_nothing() {
+        assert_eq!(mic_gain_multiplier(0), 1.0);
+    }
+
+    #[test]
+    fn mic_gain_of_100_percent_adds_12db() {
+        let expected = 10f32.powf(12.0 / 20.0);
+
+        assert!((mic_gain_multiplier(100) - expected).abs() < 0.001);
+    }
+
+    #[test]
+    fn mic_gain_rises_monotonically_with_the_slider() {
+        assert!(mic_gain_multiplier(25) < mic_gain_multiplier(75));
+    }
+
+    #[test]
+    fn apply_gain_scales_samples() {
+        let mut samples = [100_i16, -100];
+
+        apply_gain(&mut samples, 2.0);
+
+        assert_eq!(samples, [200, -200]);
+    }
+
+    #[test]
+    fn apply_gain_clips_instead_of_wrapping() {
+        let mut samples = [30_000_i16, -30_000];
+
+        apply_gain(&mut samples, 2.0);
+
+        assert_eq!(samples, [i16::MAX, i16::MIN]);
+    }
+
+    #[test]
+    fn apply_gain_of_zero_silences_everything() {
+        let mut samples = [12_345_i16, -6_789];
+
+        apply_gain(&mut samples, 0.0);
+
+        assert_eq!(samples, [0, 0]);
     }
 }

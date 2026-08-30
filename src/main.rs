@@ -278,7 +278,7 @@ impl Runtime {
         match Audio::start(
             config.openai.audio_format,
             config.audio.speaker_volume,
-            config.audio.mic_gain_db,
+            config.audio.mic_gain,
         ) {
             Ok(audio) => {
                 self.audio = Some(audio);
@@ -741,26 +741,26 @@ impl Runtime {
 
     /// スライダーで変えたマイクの感度を反映する。書き込みの間引きは
     /// [`Self::adjust_speaker_volume`] と同じ理由による。
-    fn adjust_mic_gain(&mut self, gain_db: i32, persist: bool) {
+    fn adjust_mic_gain(&mut self, percent: i32, persist: bool) {
         let Some(config) = self.config.as_mut() else {
             return;
         };
-        let gain_db = gain_db
+        let percent = percent
             .clamp(settings_layout::MIC_GAIN_MIN, settings_layout::MIC_GAIN_MAX)
             as u8;
 
-        if config.audio.mic_gain_db != gain_db {
-            config.audio.mic_gain_db = gain_db;
+        if config.audio.mic_gain != percent {
+            config.audio.mic_gain = percent;
             if let Some(audio) = self.audio.as_ref() {
-                audio.set_mic_gain(gain_db);
+                audio.set_mic_gain(percent);
             }
         }
 
         if persist {
-            if let Err(error) = config::save_mic_gain_db(&mut self.storage, gain_db) {
+            if let Err(error) = config::save_mic_gain(&mut self.storage, percent) {
                 log::warn!("マイクの感度を保存できません: {}", error.describe());
             } else {
-                log::info!("マイクの感度を保存しました: {gain_db} dB");
+                log::info!("マイクの感度を保存しました: {percent}%");
             }
         }
     }
@@ -843,14 +843,14 @@ fn run(
             .as_ref()
             .map(|config| config.openai.voice.as_str())
             .unwrap_or_default();
-        let (brightness, speaker_volume, mic_gain_db) = runtime
+        let (brightness, speaker_volume, mic_gain) = runtime
             .config
             .as_ref()
             .map(|config| {
                 (
                     config.display.brightness,
                     config.audio.speaker_volume,
-                    config.audio.mic_gain_db,
+                    config.audio.mic_gain,
                 )
             })
             .unwrap_or_default();
@@ -859,7 +859,7 @@ fn run(
             current_voice,
             brightness,
             speaker_volume,
-            mic_gain_db,
+            mic_gain,
         );
 
         if let Some(change) = touch.poll() {

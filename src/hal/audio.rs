@@ -54,6 +54,14 @@ const BSP_PA_GAIN_DB: i32 = 15;
 /// 減衰量レジスタは 0.5dB ごとに 1 進む。
 const STEPS_PER_DB: i32 = 2;
 
+/// スピーカー・マイクとも、ハードの音量・感度は常にこの値へ固定する。
+/// 音量・感度スライダーの調整はすべて、波形サンプルへ掛けるデジタルゲイン
+/// （`m5a_core::audio::speaker_gain_multiplier`/`mic_gain_multiplier`）で行う。
+/// ハードの上限まで先に振っておくことで、デジタルゲインだけで
+/// 元のハード最大より大きい／小さい範囲を連続的に扱えるようにしている。
+const FIXED_SPEAKER_VOLUME: i32 = 100;
+const FIXED_MIC_GAIN_DB: f32 = 42.0;
+
 /// コーデックの取っ手。
 ///
 /// それぞれの取っ手をひとつの仕事の中だけで使うため、別の仕事へ渡してよい。
@@ -83,10 +91,11 @@ pub struct Audio {
     /// 立てると、再生の仕事が待ち行列に溜まっている分を鳴らさずに捨てる。
     /// 割り込みで応答を打ち切ったとき、溜めておいた分が後から鳴るのを防ぐ。
     flush: Arc<AtomicBool>,
-    /// 望ましいマイクの感度（dB）。録音の仕事が毎回読み、変わっていれば
-    /// 掛け直す。設定画面のスライダーから実行中に変えられるようにするため。
-    mic_gain_db: Arc<AtomicU8>,
-    /// 望ましいスピーカーの音量（百分率）。仕組みは `mic_gain_db` と同じ。
+    /// マイク感度スライダーの位置（0〜100）。ハードは固定したまま、
+    /// 録音の仕事がこれを毎回読んでデジタルゲインとして掛ける。
+    mic_gain_percent: Arc<AtomicU8>,
+    /// スピーカー音量スライダーの位置（0〜100）。仕組みは
+    /// `mic_gain_percent` と同じで、再生の仕事がデジタルゲインとして掛ける。
     speaker_volume: Arc<AtomicU8>,
 }
 
@@ -97,7 +106,11 @@ impl Audio {
     /// PLL がロックせず、以後どれだけ書き込んでも無音のままになる。
     /// そこで先にマイクを開いて読み始め、クロックが出ている状態を作ってから
     /// スピーカーを設定する。給電は BSP のコーデック初期化が行う。
-    pub fn start(format: AudioFormat, speaker_volume: u8, mic_gain_db: u8) -> Result<Self> {
+    ///
+    /// `speaker_volume`・`mic_gain` は 0〜100 のスライダー位置で、
+    /// ハードの音量・感度そのものではない（[`FIXED_SPEAKER_VOLUME`]/
+    /// [`FIXED_MIC_GAIN_DB`] 参照）。
+    pub fn start(format: AudioFormat, speaker_volume: u8, mic_gain: u8) -> Result<Self> {
         // 既定の設定で全二重に開く。標本化周波数はコーデック側で決める。
         esp!(unsafe { bsp::bsp_audio_init(core::ptr::null()) }).context("音声を初期化できません")?;
 
@@ -105,11 +118,11 @@ impl Audio {
             unsafe { bsp::bsp_audio_codec_microphone_init() },
             "マイクを開けません",
         )?;
-        set_gain(&microphone, f32::from(mic_gain_db));
+        set_gain(&microphone, FIXED_MIC_GAIN_DB);
 
         let capturing = Arc::new(AtomicBool::new(false));
         let input_level = Arc::new(AtomicU8::new(0));
-        let mic_gain = Arc::new(AtomicU8::new(mic_gain_db));
+        let mic_gain_percent = Arc::new(AtomicU8::new(mic_gain));
         let (captured_tx, captured) = sync_channel(CAPTURE_QUEUE_DEPTH);
         spawn_capture(
             microphone,
@@ -117,7 +130,7 @@ impl Audio {
             capturing.clone(),
             input_level.clone(),
             captured_tx,
-            mic_gain.clone(),
+            mic_gain_percent.clone(),
         )?;
 
         // 読み取りが始まってクロックが安定するのを待つ。
@@ -127,7 +140,7 @@ impl Audio {
             unsafe { bsp::bsp_audio_codec_speaker_init() },
             "スピーカーを開けません",
         )?;
-        set_volume(&speaker, i32::from(speaker_volume));
+        set_volume(&speaker, FIXED_SPEAKER_VOLUME);
         restore_amplifier_gain(&speaker);
 
         let level = Arc::new(AtomicU8::new(0));
@@ -154,17 +167,17 @@ impl Audio {
             speaking,
             dropped: Arc::new(AtomicUsize::new(0)),
             flush,
-            mic_gain_db: mic_gain,
+            mic_gain_percent,
             speaker_volume,
         })
     }
 
-    /// マイクの感度を実行中に変える。設定画面のスライダー用。
-    pub fn set_mic_gain(&self, gain_db: u8) {
-        self.mic_gain_db.store(gain_db, Ordering::Relaxed);
+    /// マイクの感度スライダーの位置（0〜100）を実行中に変える。
+    pub fn set_mic_gain(&self, percent: u8) {
+        self.mic_gain_percent.store(percent.min(100), Ordering::Relaxed);
     }
 
-    /// スピーカーの音量を実行中に変える。設定画面のスライダー用。
+    /// スピーカーの音量スライダーの位置（0〜100）を実行中に変える。
     pub fn set_speaker_volume(&self, percent: u8) {
         self.speaker_volume.store(percent.min(100), Ordering::Relaxed);
     }
@@ -301,23 +314,15 @@ fn spawn_capture(
     capturing: Arc<AtomicBool>,
     input_level: Arc<AtomicU8>,
     captured: SyncSender<Vec<u8>>,
-    mic_gain_db: Arc<AtomicU8>,
+    mic_gain_percent: Arc<AtomicU8>,
 ) -> Result<()> {
     thread::Builder::new()
         .stack_size(THREAD_STACK)
         .spawn(move || {
             let microphone = microphone;
             let mut samples = vec![0_i16; CHUNK_SAMPLES];
-            // 起動時にすでに掛けてある値と揃えておき、二重に設定し直さない。
-            let mut applied_gain = mic_gain_db.load(Ordering::Relaxed);
 
             loop {
-                let wanted_gain = mic_gain_db.load(Ordering::Relaxed);
-                if wanted_gain != applied_gain {
-                    set_gain(&microphone, f32::from(wanted_gain));
-                    applied_gain = wanted_gain;
-                }
-
                 let bytes = (samples.len() * 2) as i32;
                 let result = unsafe {
                     bsp::esp_codec_dev_read(microphone.0, samples.as_mut_ptr().cast(), bytes)
@@ -327,6 +332,12 @@ fn spawn_capture(
                     thread::sleep(RETRY_DELAY);
                     continue;
                 }
+
+                // ハードは固定しているため、感度の調整はここで波形に掛ける
+                // デジタルゲインだけで行う。声の区切り判定・送信のどちらも
+                // 同じ「実際に効いている感度」を見るよう、判定より先に掛ける。
+                let gain = waveform::mic_gain_multiplier(mic_gain_percent.load(Ordering::Relaxed));
+                waveform::apply_gain(&mut samples, gain);
 
                 // 録音していない間も読み続ける。止めると I2S のクロックが途切れる。
                 let is_capturing = capturing.load(Ordering::Relaxed);
@@ -364,17 +375,8 @@ fn spawn_playback(
 
             let mut played = 0_usize;
             let silence_samples = DEVICE_RATE as usize * IDLE_SILENCE.as_millis() as usize / 1_000;
-            // 起動時にすでに掛けてある値と揃えておき、二重に設定し直さない。
-            let mut applied_volume = speaker_volume.load(Ordering::Relaxed);
 
             loop {
-                let wanted_volume = speaker_volume.load(Ordering::Relaxed);
-                if wanted_volume != applied_volume {
-                    set_volume(&speaker, i32::from(wanted_volume));
-                    restore_amplifier_gain(&speaker);
-                    applied_volume = wanted_volume;
-                }
-
                 if flush.swap(false, Ordering::Relaxed) {
                     while playing.try_recv().is_ok() {}
                     level.store(0, Ordering::Relaxed);
@@ -384,7 +386,13 @@ fn spawn_playback(
                 let mut samples = match playing.recv_timeout(IDLE_SILENCE) {
                     Ok(chunk) => {
                         played += 1;
-                        let samples = decode(&chunk, format);
+                        let mut samples = decode(&chunk, format);
+                        // ハードは固定しているため、音量の調整はここで波形に
+                        // 掛けるデジタルゲインだけで行う。口の開き具合も、
+                        // ここで掛けたあとの「実際に鳴る音量」を見て決める。
+                        let gain =
+                            waveform::speaker_gain_multiplier(speaker_volume.load(Ordering::Relaxed));
+                        waveform::apply_gain(&mut samples, gain);
                         level.store(waveform::measure_level(&samples), Ordering::Relaxed);
                         speaking.store(true, Ordering::Relaxed);
 

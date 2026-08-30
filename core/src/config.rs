@@ -79,12 +79,15 @@ audio_format = "ulaw"
 api_key = ""
 
 [audio]
-# スピーカーの音量 (0〜100)。設定画面のスライダーからも変えられます。
-speaker_volume = 80
+# スピーカーの音量 (0〜100)。ハードの音量は常に最大に固定し、この値は
+# デジタルゲインとして掛かります。50が今までの音量の最大相当、
+# 100でその約2倍まで上げられます。設定画面のスライダーからも変えられます。
+speaker_volume = 40
 
-# マイクの感度 (dB)。小さいと声を拾いにくくなります。
-# 設定画面のスライダーからも変えられます。
-mic_gain_db = 36
+# マイクの感度 (0〜100)。ハードの感度は常に最大に固定し、この値は
+# 上乗せするデジタルゲインです。0で上乗せ無し、100で+12dBまで
+# 上げられます。設定画面のスライダーからも変えられます。
+mic_gain = 0
 
 [display]
 # 画面の明るさ (30〜100)。設定画面のスライダーからも変えられます。
@@ -160,21 +163,25 @@ pub struct OpenAiConfig {
 }
 
 /// スピーカーとマイクの音量・感度。設定画面のスライダーで変えられる。
+///
+/// ハードの音量・感度は常に最大へ固定してあり（`hal::audio` 参照）、
+/// ここに置く値はいずれも0〜100の「デジタルゲインの掛け具合」を表す
+/// （`m5a_core::audio::speaker_gain_multiplier`/`mic_gain_multiplier`）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AudioConfig {
-    /// スピーカーの音量（百分率）。
+    /// スピーカー音量スライダーの位置（0〜100）。50が基準点（等倍）。
     #[serde(default = "default_speaker_volume")]
     pub speaker_volume: u8,
-    /// マイクの入力感度（dB）。
-    #[serde(default = "default_mic_gain_db")]
-    pub mic_gain_db: u8,
+    /// マイク感度スライダーの位置（0〜100）。0で上乗せ無し。
+    #[serde(default = "default_mic_gain")]
+    pub mic_gain: u8,
 }
 
 impl Default for AudioConfig {
     fn default() -> Self {
         Self {
             speaker_volume: default_speaker_volume(),
-            mic_gain_db: default_mic_gain_db(),
+            mic_gain: default_mic_gain(),
         }
     }
 }
@@ -243,12 +250,17 @@ fn default_voice() -> String {
     DEFAULT_VOICE.to_string()
 }
 
+/// 50が「ハードの音量を100%にしていた頃の最大音量」に相当する基準点。
+/// 40はその80%で、デジタルゲイン導入前の既定値と同じ大きさに鳴る。
 fn default_speaker_volume() -> u8 {
-    80
+    40
 }
 
-fn default_mic_gain_db() -> u8 {
-    36
+/// 0（上乗せ無し）を既定にする。ハードの感度をすでに最大へ固定して
+/// あるため、追加のデジタルゲインなしでも以前の調整値（36dB）より
+/// 感度が高い。
+fn default_mic_gain() -> u8 {
+    0
 }
 
 fn default_brightness() -> u8 {
@@ -454,8 +466,8 @@ pub fn save_speaker_volume<S: Storage>(storage: &mut S, percent: u8) -> Result<(
 }
 
 /// マイクの感度を `config.toml` に書き戻す。
-pub fn save_mic_gain_db<S: Storage>(storage: &mut S, gain_db: u8) -> Result<(), ConfigError> {
-    save_toml_line(storage, "audio", "mic_gain_db", &format!("mic_gain_db = {gain_db}"))
+pub fn save_mic_gain<S: Storage>(storage: &mut S, percent: u8) -> Result<(), ConfigError> {
+    save_toml_line(storage, "audio", "mic_gain", &format!("mic_gain = {percent}"))
 }
 
 /// 画面の明るさを `config.toml` に書き戻す。
@@ -768,20 +780,20 @@ mod tests {
         let config = load_config(&mut MemoryStorage::with_file(CONFIG_PATH, &filled_source()))
             .expect("記入済みなら読めるはず");
 
-        assert_eq!(config.audio.speaker_volume, 80);
-        assert_eq!(config.audio.mic_gain_db, 36);
+        assert_eq!(config.audio.speaker_volume, 40);
+        assert_eq!(config.audio.mic_gain, 0);
     }
 
     #[test]
     fn audio_settings_can_be_customized() {
         let source = filled_source()
-            .replace("speaker_volume = 80", "speaker_volume = 60")
-            .replace("mic_gain_db = 36", "mic_gain_db = 30");
+            .replace("speaker_volume = 40", "speaker_volume = 60")
+            .replace("mic_gain = 0", "mic_gain = 30");
 
         let config = parse_config(&source).expect("記入済みなら読めるはず");
 
         assert_eq!(config.audio.speaker_volume, 60);
-        assert_eq!(config.audio.mic_gain_db, 30);
+        assert_eq!(config.audio.mic_gain, 30);
     }
 
     #[test]
@@ -793,19 +805,19 @@ mod tests {
         let stored = storage.peek(CONFIG_PATH).expect("書き戻されているはず");
         let config = parse_config(stored).expect("書き戻した内容も読めるはず");
         assert_eq!(config.audio.speaker_volume, 45);
-        assert_eq!(config.audio.mic_gain_db, 36);
+        assert_eq!(config.audio.mic_gain, 0);
     }
 
     #[test]
-    fn save_mic_gain_db_replaces_only_that_line() {
+    fn save_mic_gain_replaces_only_that_line() {
         let mut storage = MemoryStorage::with_file(CONFIG_PATH, &filled_source());
 
-        save_mic_gain_db(&mut storage, 20).expect("感度を保存できるはず");
+        save_mic_gain(&mut storage, 20).expect("感度を保存できるはず");
 
         let stored = storage.peek(CONFIG_PATH).expect("書き戻されているはず");
         let config = parse_config(stored).expect("書き戻した内容も読めるはず");
-        assert_eq!(config.audio.mic_gain_db, 20);
-        assert_eq!(config.audio.speaker_volume, 80);
+        assert_eq!(config.audio.mic_gain, 20);
+        assert_eq!(config.audio.speaker_volume, 40);
     }
 
     #[test]
@@ -848,7 +860,7 @@ mod tests {
         let stored = storage.peek(CONFIG_PATH).expect("書き戻されているはず");
         let config = parse_config(stored).expect("書き戻した内容も読めるはず");
         assert_eq!(config.display.brightness, 65);
-        assert_eq!(config.audio.speaker_volume, 80);
+        assert_eq!(config.audio.speaker_volume, 40);
     }
 
     #[test]
@@ -867,13 +879,13 @@ mod tests {
     fn replace_toml_line_inserts_into_an_existing_section_missing_the_key() {
         let source = "[audio]\nspeaker_volume = 80\n[wifi]\nssid = \"x\"\n";
 
-        let updated = replace_toml_line(source, "audio", "mic_gain_db", "mic_gain_db = 20");
+        let updated = replace_toml_line(source, "audio", "mic_gain", "mic_gain = 20");
 
         assert!(updated.contains("speaker_volume = 80"));
-        assert!(updated.contains("mic_gain_db = 20"));
+        assert!(updated.contains("mic_gain = 20"));
         assert!(updated.contains("[wifi]"));
         // 挿入した行は [wifi] より前、対象セクションの中にあること。
-        let mic_pos = updated.find("mic_gain_db = 20").unwrap();
+        let mic_pos = updated.find("mic_gain = 20").unwrap();
         let wifi_pos = updated.find("[wifi]").unwrap();
         assert!(mic_pos < wifi_pos);
     }

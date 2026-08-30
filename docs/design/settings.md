@@ -181,17 +181,30 @@ SDカードの摩耗と処理落ちの原因になるため。指を離した瞬
 `lv_obj_has_state(slider, LV_STATE_PRESSED)` の変化（真→偽）を毎コマ見て
 検出する（`hal::settings_view::read_slider()`）。
 
-**明るさだけは `Audio` を介さず直接効かせられる** —
-`Audio::start()` はマイク・スピーカーの取っ手（`Codec`）をそれぞれの
-仕事スレッドへ渡しきってしまうため、`Audio` 自身は直接
-`esp_codec_dev_set_in_gain`/`set_out_vol` を呼べない。そこで
-`Arc<AtomicU8>` で「望ましい値」を共有し、各スレッドが自分のループの
-中で値の変化を見つけたときにだけコーデックへ書き込む
-（`hal::audio::spawn_capture`/`spawn_playback`）。画面の明るさは
-バックライトの制御が BSP の同期呼び出し（`bsp_display_brightness_set`）
-一つで完結し、録音・再生のような専用スレッドに取っ手が閉じ込められて
+**スピーカー・マイクはハードを固定し、デジタルゲインで上下させる** —
+音量・感度スライダーの値は、もはやハードの音量・感度そのものではない。
+`hal::audio::Audio::start()` は起動時に一度だけ、スピーカーの音量を
+`esp_codec_dev_set_out_vol` で常に100%へ、マイクの感度を
+`esp_codec_dev_set_in_gain` で常に固定値（`FIXED_MIC_GAIN_DB`、42dB）へ
+設定し、以後変えない。スライダーの0〜100は、その固定したハードの
+出力・入力へ掛ける倍率（`m5a_core::audio::speaker_gain_multiplier()`/
+`mic_gain_multiplier()`）に変換され、録音・再生の仕事スレッドが
+波形サンプルへ直接掛ける（`m5a_core::audio::apply_gain()`、
+signed 16bit の範囲を超えた分はクリップ）。ハードの上限を先に
+使い切ってから、その上をデジタルゲインだけで連続的に引き上げ／
+引き下げられるようにするための構成で、スピーカーは50%が
+「ハードの音量を100%にしていた頃の音量」に相当する基準点、
+マイクは0%が「上乗せ無し（ハード固定値のまま）」に相当する基準点になる。
+値は `hal::audio::Audio::set_speaker_volume()`/`set_mic_gain()` で
+`Arc<AtomicU8>` へ渡すだけで、コーデックの取っ手（各仕事スレッドの中に
+閉じ込められている）へは触れない。
+
+**明るさだけはハードを直接その場で変えられる** —
+バックライトの制御は BSP の同期呼び出し（`bsp_display_brightness_set`）
+一つで完結し、録音・再生のように専用スレッドに取っ手が閉じ込められて
 いないため、`Runtime::adjust_brightness()` から `board::set_brightness()`
-を直接その場で呼ぶだけでよい。
+を直接その場で呼ぶだけでよい。デジタルゲインのような波形処理を挟む
+必要が無い。
 
 **この一コマの描画に間に合わせる** — `main.rs::run()` は、この一コマの
 `SettingsLayout` を作る前に `SettingsView::brightness()`/`speaker_volume()`/

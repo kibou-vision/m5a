@@ -27,9 +27,11 @@ const SLIDER_HEIGHT: u16 = 12;
 /// クランプにも使うため公開する。
 pub const SPEAKER_VOLUME_MIN: i32 = 0;
 pub const SPEAKER_VOLUME_MAX: i32 = 100;
-/// マイク感度スライダーの範囲（dB）。
+/// マイク感度スライダーの範囲（百分率）。ハードの感度は常に最大へ
+/// 固定してあり、この値はそこへ上乗せするデジタルゲインの掛け具合
+/// （`m5a_core::audio::mic_gain_multiplier`）を表す。
 pub const MIC_GAIN_MIN: i32 = 0;
-pub const MIC_GAIN_MAX: i32 = 42;
+pub const MIC_GAIN_MAX: i32 = 100;
 /// 画面の明るさスライダーの範囲（百分率）。下限を30%に留めているのは、
 /// それ未満まで暗くすると実機で表示がほとんど見えなくなるため。
 pub const BRIGHTNESS_MIN: i32 = 30;
@@ -147,14 +149,14 @@ pub struct SettingsLayout {
 /// `current_voice` は選択中の声。`SUPPORTED_VOICES` に含まれない値が渡された
 /// 場合でも一覧はそのまま描き、先頭の声を選択中として扱う（`Config::validate()`
 /// を通った設定は必ず `SUPPORTED_VOICES` に含まれるため、実際には起こらない）。
-/// `brightness`（百分率）・`speaker_volume`（百分率）・`mic_gain_db`（dB）は、
+/// `brightness`・`speaker_volume`・`mic_gain` はいずれも0〜100の百分率で、
 /// それぞれの行が準備完了になったときにスライダーへ渡す現在値。
 pub fn lay_out_settings(
     statuses: &ModuleStatuses,
     current_voice: &str,
     brightness: u8,
     speaker_volume: u8,
-    mic_gain_db: u8,
+    mic_gain: u8,
 ) -> SettingsLayout {
     let entries = statuses.entries();
     let realtime_ready = statuses.realtime_session.is_ready();
@@ -213,7 +215,7 @@ pub fn lay_out_settings(
                     slider_width,
                     brightness,
                     speaker_volume,
-                    mic_gain_db,
+                    mic_gain,
                 )
             })
             .flatten();
@@ -285,7 +287,7 @@ fn slider_of(
     width: u16,
     brightness: u8,
     speaker_volume: u8,
-    mic_gain_db: u8,
+    mic_gain: u8,
 ) -> Option<SliderSpec> {
     let area = Rect {
         x: message_area.x,
@@ -311,7 +313,7 @@ fn slider_of(
             area,
             min: MIC_GAIN_MIN,
             max: MIC_GAIN_MAX,
-            value: i32::from(mic_gain_db).clamp(MIC_GAIN_MIN, MIC_GAIN_MAX),
+            value: i32::from(mic_gain).clamp(MIC_GAIN_MIN, MIC_GAIN_MAX),
         }),
         _ => None,
     }
@@ -334,7 +336,7 @@ mod tests {
     /// テストで使う既定の明るさ・スピーカー音量・マイク感度。
     const BRIGHTNESS: u8 = 50;
     const VOLUME: u8 = 80;
-    const GAIN_DB: u8 = 36;
+    const MIC_GAIN: u8 = 36;
 
     fn ready_statuses() -> ModuleStatuses {
         let mut statuses = ModuleStatuses::booting();
@@ -347,7 +349,7 @@ mod tests {
     }
 
     fn layout_of(statuses: &ModuleStatuses, current_voice: &str) -> SettingsLayout {
-        lay_out_settings(statuses, current_voice, BRIGHTNESS, VOLUME, GAIN_DB)
+        lay_out_settings(statuses, current_voice, BRIGHTNESS, VOLUME, MIC_GAIN)
     }
 
     /// モジュールの数が多い（WebSearchを含む）場合、縦方向は画面高さを
@@ -475,7 +477,8 @@ mod tests {
             .find(|row| row.icon_symbol == IconSymbol::Microphone)
             .expect("microphone row exists");
         let slider = mic_row.slider.expect("microphone is ready");
-        assert_eq!(slider.value, i32::from(GAIN_DB));
+        assert_eq!(slider.value, i32::from(MIC_GAIN));
+        assert_eq!((slider.min, slider.max), (0, 100));
         assert!(mic_row.message.is_empty());
     }
 
