@@ -15,7 +15,7 @@ classDiagram
 
   class ScreenEvent {
     <<enum>>
-    SwipedToAssistant / SwipedToSettings
+    SwipedToSettings / CloseButtonPressed
     ProblemDetected / AllModulesReady
   }
 
@@ -207,12 +207,10 @@ Rust 側に複製する形をとった。既定の 14px フォントでは小さ
 という他のボタンと同じやり方で十分だったため、ここだけライブラリの
 部品にはしていない。
 
-タップされたら、左から右へのスワイプと全く同じ
-`screen::transition_screen(screen, ScreenEvent::SwipedToAssistant)` を呼ぶ。
-「閉じるボタン専用のきっかけ」を新設せず、既存のイベントを再利用した方が
-`ScreenEvent` の意味を素直に保てると判断した（スワイプかボタンかは
-きっかけの発生源が違うだけで、画面の遷移先としては同じ「アシスタント画面へ
-戻る」であるため）。
+タップされたら `screen::transition_screen(screen, ScreenEvent::CloseButtonPressed)`
+を呼ぶ。設定画面からアシスタント画面へ戻る手段は、この閉じるボタンと
+[全モジュール準備完了による自動復帰](#全モジュール準備完了による自動復帰との競合)
+の2つだけで、**スワイプでは戻れない**（後述）。
 
 ## スワイプ判定
 
@@ -228,12 +226,21 @@ Rust 側に複製する形をとった。既定の 14px フォントでは小さ
 二重判定を避ける（指を動かさずに離した「タップ」だけが `Released` 側の
 判定に残る）。
 
+**設定画面を閉じる方向のスワイプには対応しない** —
+`main.rs::screen_event_of()` は左スワイプ（`SwipeDirection::Left`、
+設定画面を開く方向）だけを `ScreenEvent::SwipedToSettings` に変換し、
+右スワイプ（閉じる方向）には対応するきっかけを返さない
+（`Option<ScreenEvent>` の `None`）。閉じる操作を誤って行ってしまう
+事故を減らし、閉じる手段を閉じるボタンだけに絞るための意図的な非対称。
+`handle_swipe()` はそれでも、押した瞬間に始まってしまっていた録音の
+後始末（次項）だけは方向によらず行う。
+
 押した瞬間はスワイプかタップか分からず、アシスタント画面では先に
-録音を始めてしまっている。実際にはスワイプだったと分かったら
-（`main.rs::handle_swipe()`）、`AppEvent::SpeechNotDetected` を送って
-「何も言わずに録音を終えた」ことにし、静かに `Ready` へ戻す
-（新しいイベントは増やさず、既存の「声が無いまま沈黙が続いた」経路を
-再利用している）。
+録音を始めてしまっている。指が動いてスワイプだったと分かったら
+（`main.rs::handle_swipe()`）、それが画面を切り替えない右スワイプで
+あっても、`AppEvent::SpeechNotDetected` を送って「何も言わずに録音を
+終えた」ことにし、静かに `Ready` へ戻す（新しいイベントは増やさず、
+既存の「声が無いまま沈黙が続いた」経路を再利用している）。
 
 ### 全モジュール準備完了による自動復帰との競合
 

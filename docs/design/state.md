@@ -102,10 +102,15 @@ stateDiagram-v2
   [*] --> Settings
 
   Assistant --> Settings : SwipedToSettings（右→左）
-  Settings --> Assistant : SwipedToAssistant（左→右）
+  Settings --> Assistant : CloseButtonPressed<br/>（閉じるボタン）
   Assistant --> Settings : ProblemDetected<br/>（SetupRequired / Recovering に入った）
   Settings --> Assistant : AllModulesReady<br/>（監視対象の全モジュールが Ready）
 ```
+
+設定画面を閉じてアシスタント画面へ戻る手段はスワイプでは持たせず、
+閉じるボタン（`CloseButtonPressed`）と全モジュール準備完了による
+自動復帰（`AllModulesReady`）の2つだけにしてある
+（[設定画面の設計](settings.md#閉じるボタン)参照）。
 
 `ProblemDetected` はスワイプでアシスタント画面に留まろうとしていても
 上書きする。各モジュールの準備状況は `core/src/module_status.rs` の

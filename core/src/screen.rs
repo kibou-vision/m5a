@@ -16,10 +16,13 @@ pub enum Screen {
 /// 画面を切り替えるきっかけ。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScreenEvent {
-    /// 指で左右にスワイプし、アシスタント画面へ切り替えた。
-    SwipedToAssistant,
-    /// 指で左右にスワイプし、設定画面へ切り替えた。
+    /// 指で左スワイプし、設定画面へ切り替えた。
     SwipedToSettings,
+    /// 設定画面の閉じるボタンを押した。
+    ///
+    /// 設定画面からアシスタント画面へは、スワイプでは戻れない
+    /// （閉じるボタン・[`Self::AllModulesReady`] のいずれかでのみ戻る）。
+    CloseButtonPressed,
     /// 設定不備や失敗が起き、親に対処してもらう必要が生じた。
     ProblemDetected,
     /// 監視対象の全モジュールが準備できた。
@@ -28,12 +31,12 @@ pub enum ScreenEvent {
 
 /// 画面ときっかけから次に出す画面を決める。
 ///
-/// 自動遷移（`ProblemDetected` / `AllModulesReady`）とスワイプによる
-/// 手動切り替えは対等に扱い、直近に届いたきっかけが画面を決める。
+/// 自動遷移（`ProblemDetected` / `AllModulesReady`）と手動切り替えは
+/// 対等に扱い、直近に届いたきっかけが画面を決める。
 pub fn transition_screen(current: Screen, event: ScreenEvent) -> Screen {
     let _ = current;
     match event {
-        ScreenEvent::SwipedToAssistant => Screen::Assistant,
+        ScreenEvent::CloseButtonPressed => Screen::Assistant,
         ScreenEvent::SwipedToSettings => Screen::Settings,
         ScreenEvent::ProblemDetected => Screen::Settings,
         ScreenEvent::AllModulesReady => Screen::Assistant,
@@ -45,13 +48,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn swiping_switches_between_screens() {
+    fn swiping_opens_settings() {
         assert_eq!(
             transition_screen(Screen::Assistant, ScreenEvent::SwipedToSettings),
             Screen::Settings
         );
+    }
+
+    #[test]
+    fn close_button_returns_to_assistant() {
         assert_eq!(
-            transition_screen(Screen::Settings, ScreenEvent::SwipedToAssistant),
+            transition_screen(Screen::Settings, ScreenEvent::CloseButtonPressed),
             Screen::Assistant
         );
     }
