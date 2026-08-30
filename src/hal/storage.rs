@@ -1,7 +1,10 @@
 //! microSD カードの読み書き。
 //!
-//! LCD の DC と SD の MISO が同じ端子 (GPIO35) に繋がっているため、
-//! 画面を初期化する前に設定を読み終えて、カードを外す運用にしている。
+//! LCD の DC と SD の MISO が同じ端子 (GPIO35) に繋がっているが、
+//! BSP（`espressif/m5stack_core_s3`）がこの取り合いを処理するため、
+//! カードを挿したまま画面を使い続けられる（[CoreS3 の制約](../../docs/design/hardware.md)
+//! 参照）。設定画面のスライダーのように、画面を表示したまま実行中に
+//! いつでも書き戻せる。
 
 use std::fs;
 use std::io::Write as _;

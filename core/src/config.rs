@@ -891,6 +891,31 @@ mod tests {
     }
 
     #[test]
+    fn brightness_survives_a_full_boot_cycle_from_a_freshly_created_card() {
+        // create_template() が作った、そのままのテンプレートから始める。
+        let mut storage = MemoryStorage::new();
+        assert_eq!(load_config(&mut storage), Err(ConfigError::TemplateCreated));
+
+        // 親が空欄を埋める。
+        let filled = storage
+            .peek(CONFIG_PATH)
+            .unwrap()
+            .replacen("name = \"\"", "name = \"はると\"", 1)
+            .replacen("ssid = \"\"", "ssid = \"home-wifi\"", 1)
+            .replacen("password = \"\"", "password = \"pass1234\"", 1)
+            .replacen("api_key = \"\"", "api_key = \"sk-proj-abcdef\"", 1);
+        storage.write_text(CONFIG_PATH, &filled).unwrap();
+
+        let config = load_config(&mut storage).expect("記入済みなら読めるはず");
+        assert_eq!(config.display.brightness, 50, "既定値のはず");
+
+        save_brightness(&mut storage, 22).expect("明るさを保存できるはず");
+
+        let reloaded = load_config(&mut storage).expect("保存後も読めるはず");
+        assert_eq!(reloaded.display.brightness, 22, "保存した値が読み戻せるはず");
+    }
+
+    #[test]
     fn every_problem_offers_a_remedy() {
         let problems = [
             ConfigProblem::ChildNameUnwritten,
