@@ -68,13 +68,22 @@ pub fn touch_device() -> *mut bsp::lv_indev_t {
 /// 供給し続けるバックライトには触れない。呼ぶ前にバックライトを消し
 /// パネルを休止させないと、CPU は眠っていても**画面は点いたまま**になる。
 ///
+/// `bsp_display_enter_sleep()` は LVGL を介さず `esp_lcd_panel_disp_on_off`
+/// を直接呼んでパネルへコマンドを送る。LVGL の描画タスクが同じ SPI バスへ
+/// 同時にフレームを流している最中にこれを行うと衝突し、**電源を切ったはずが
+/// 再起動する**形で壊れる（実機で確認済み）。他の画面操作と同じく
+/// `DisplayLock` で描画タスクを止めてから呼ぶ。
+///
 /// 起床要因をあえて設定しない。中途半端に自動で目覚める仕組みを持たせると、
 /// 切ったはずが動き続けているように見えてしまうため、復帰には
 /// 実機の電源ボタンでの再起動を必要とする形にする。
 pub fn power_off() -> ! {
     unsafe {
         bsp::bsp_display_backlight_off();
-        bsp::bsp_display_enter_sleep();
+        {
+            let _lock = DisplayLock::acquire();
+            bsp::bsp_display_enter_sleep();
+        }
         esp_idf_svc::sys::esp_deep_sleep_start()
     }
 }

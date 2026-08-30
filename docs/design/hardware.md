@@ -50,6 +50,17 @@ LCD バックライトは AXP2101 の DLDO1 から給電されており、CPU �
 必要がある（`hal::board::power_off`）。どちらも BSP の標準 API で、
 レジスタを自前で書くわけではない。
 
+**`bsp_display_enter_sleep()` は LVGL の描画タスクと衝突する。**
+中身は `esp_lcd_panel_disp_on_off()` を直接呼んでパネルへコマンドを
+送るだけで、LVGL を介さない。LVGL の描画タスクは別スレッドで同じ SPI
+バスへフレームを流し続けているため、`DisplayLock` で止めずに呼ぶと
+SPI 通信が衝突し、**電源を切ったはずが再起動する**という分かりにくい
+壊れ方をする（実機で確認）。他の画面操作（`hal::settings_view` の
+`write()` など）と同じく、`DisplayLock::acquire()` で描画タスクを
+止めてから呼ぶ必要がある。バックライトを消す `bsp_display_backlight_off()`
+（`bsp_display_brightness_set(0)` と同じ経路）は LVGL のオブジェクトを
+触らないため、こちらはロック不要。
+
 ## I2C は 100kHz
 
 FT6336 タッチパネルが 400kHz では応答しない。内部バス全体を 100kHz で動かす。
