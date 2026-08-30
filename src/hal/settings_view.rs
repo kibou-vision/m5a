@@ -7,15 +7,12 @@
 use std::ffi::CString;
 
 use esp_idf_svc::sys::bsp;
+use m5a_core::config::SUPPORTED_VOICES;
 use m5a_core::layout::{Color, Rect};
-use m5a_core::settings_layout::{
-    self, BadgeSymbol, IconSymbol, SettingsLayout, SliderSpec, StatusRow, VoiceOption,
-};
+use m5a_core::settings_layout::{BadgeSymbol, IconSymbol, SettingsLayout, SliderSpec, StatusRow};
 
 /// 一覧表示できるモジュールの最大数。[`Module`] の種類数に合わせる。
 const MAX_ROWS: usize = 7;
-/// [`m5a_core::config::SUPPORTED_VOICES`] の数。
-const MAX_VOICE_BUTTONS: usize = 10;
 
 const MAIN_PART: u32 = 0;
 const INDICATOR_PART: u32 = bsp::lv_part_t_LV_PART_INDICATOR;
@@ -23,7 +20,6 @@ const KNOB_PART: u32 = bsp::lv_part_t_LV_PART_KNOB;
 const OPAQUE: u8 = 255;
 
 const TEXT_COLOR: Color = Color::new(230, 235, 240);
-const VOICE_TEXT_COLOR: Color = Color::new(240, 240, 240);
 /// スライダーの色。準備完了を示す色と揃える。
 const SLIDER_COLOR: Color = Color::new(90, 200, 120);
 
@@ -39,7 +35,10 @@ pub struct SettingsView {
     /// 部品をまとめる入れ物。アシスタント画面とはこれごと見せ隠しする。
     container: *mut bsp::lv_obj_t,
     rows: [ModuleRow; MAX_ROWS],
-    voice_buttons: [*mut bsp::lv_obj_t; MAX_VOICE_BUTTONS],
+    /// 声を選ぶコンボボックス。スピーカーの行にだけ並べて置く。
+    voice_combo: *mut bsp::lv_obj_t,
+    /// アシスタント画面へ戻る閉じるボタン。
+    close_button: *mut bsp::lv_obj_t,
     applied: Option<SettingsLayout>,
     speaker_was_pressed: bool,
     mic_was_pressed: bool,
@@ -72,19 +71,29 @@ impl SettingsView {
                 }
             });
 
-            let voice_buttons = std::array::from_fn(|_| make_label(container));
+            let voice_combo = make_combo(container);
+            let close_button = make_label(container);
+            bsp::lv_obj_set_style_text_font(close_button, &bsp::lv_font_montserrat_20, MAIN_PART);
 
             hide(container);
 
             Self {
                 container,
                 rows,
-                voice_buttons,
+                voice_combo,
+                close_button,
                 applied: None,
                 speaker_was_pressed: false,
                 mic_was_pressed: false,
             }
         }
+    }
+
+    /// 声のコンボボックスで選ばれている声。表示されていなければ `None`。
+    pub fn voice_selection(&self) -> Option<&'static str> {
+        self.applied.as_ref()?.voice_picker.as_ref()?;
+        let index = unsafe { bsp::lv_dropdown_get_selected(self.voice_combo) } as usize;
+        SUPPORTED_VOICES.get(index).copied()
     }
 
     /// スピーカー音量スライダーの現在値。表示されていなければ `None`。
@@ -142,18 +151,24 @@ impl SettingsView {
             }
         }
 
-        let options: &[VoiceOption] = layout
-            .voice_picker
-            .as_ref()
-            .map(|picker| picker.options.as_slice())
-            .unwrap_or(&[]);
-
-        for (index, button) in self.voice_buttons.iter().enumerate() {
-            match options.get(index) {
-                Some(option) => write_voice_button(*button, option),
-                None => hide(*button),
+        match layout.voice_picker.as_ref() {
+            Some(picker) => {
+                place(self.voice_combo, picker.area);
+                bsp::lv_dropdown_set_selected(self.voice_combo, picker.selected_index as u32);
+                show(self.voice_combo);
             }
+            None => hide(self.voice_combo),
         }
+
+        place(self.close_button, layout.close_button);
+        set_text(self.close_button, "\u{F00D}"); // LV_SYMBOL_CLOSE
+        bsp::lv_obj_set_style_text_color(self.close_button, color_of(TEXT_COLOR), MAIN_PART);
+        bsp::lv_obj_set_style_text_align(
+            self.close_button,
+            bsp::lv_text_align_t_LV_TEXT_ALIGN_CENTER,
+            MAIN_PART,
+        );
+        show(self.close_button);
     }
 }
 
@@ -218,19 +233,6 @@ unsafe fn read_slider(slider: *mut bsp::lv_obj_t, was_pressed: &mut bool) -> Sli
     }
 }
 
-unsafe fn write_voice_button(button: *mut bsp::lv_obj_t, option: &VoiceOption) {
-    place(button, option.area);
-    set_text(button, option.voice);
-    bsp::lv_obj_set_style_text_color(button, color_of(VOICE_TEXT_COLOR), MAIN_PART);
-    bsp::lv_obj_set_style_bg_color(
-        button,
-        color_of(settings_layout::voice_button_color(option)),
-        MAIN_PART,
-    );
-    bsp::lv_obj_set_style_text_align(button, bsp::lv_text_align_t_LV_TEXT_ALIGN_CENTER, MAIN_PART);
-    show(button);
-}
-
 /// 文字だけの板を作る。ラベルにも、色を塗るボタンにも使う。
 unsafe fn make_label(parent: *mut bsp::lv_obj_t) -> *mut bsp::lv_obj_t {
     let label = bsp::lv_label_create(parent);
@@ -260,6 +262,21 @@ unsafe fn make_slider(parent: *mut bsp::lv_obj_t) -> *mut bsp::lv_obj_t {
     hide(slider);
 
     slider
+}
+
+/// 声を選ぶコンボボックスを作る。開閉・選択の当たり判定・一覧の描画は
+/// すべて LVGL の `lv_dropdown` にまかせ、ここでは選択肢を渡すだけにする。
+/// `SUPPORTED_VOICES` の並びは変わらないため、選択肢は最初の一回だけ渡す。
+unsafe fn make_combo(parent: *mut bsp::lv_obj_t) -> *mut bsp::lv_obj_t {
+    let dropdown = bsp::lv_dropdown_create(parent);
+
+    let options = SUPPORTED_VOICES.join("\n");
+    if let Ok(options) = CString::new(options) {
+        bsp::lv_dropdown_set_options(dropdown, options.as_ptr());
+    }
+    hide(dropdown);
+
+    dropdown
 }
 
 /// 設定画面全体をまとめる、画面いっぱいの入れ物を作る。

@@ -9,9 +9,11 @@ use crate::module_status::{Module, ModuleStatus, ModuleStatuses};
 
 /// 一覧の外側の余白。
 const MARGIN: i16 = 6;
+/// 画面いちばん上、閉じるボタンだけのための帯の高さ。
+const HEADER_HEIGHT: i16 = 20;
 /// モジュール1行分の高さ。標準構成（WebSearch無効・6行）なら、
-/// 声の一覧まで含めて画面高さ240に収まる大きさにしてある。
-const ROW_HEIGHT: u16 = 29;
+/// ヘッダーぶんを差し引いても画面高さ240に収まる大きさにしてある。
+const ROW_HEIGHT: u16 = 34;
 /// アイコンの正方形の一辺。
 const ICON_SIZE: u16 = 26;
 /// アイコンと文字の間隔。
@@ -29,18 +31,18 @@ pub const SPEAKER_VOLUME_MAX: i32 = 100;
 pub const MIC_GAIN_MIN: i32 = 0;
 pub const MIC_GAIN_MAX: i32 = 42;
 
-/// 声を選ぶボタン1個の大きさ。`SUPPORTED_VOICES` は10種類あるため2段×5列で並べる。
-const VOICE_BUTTON_WIDTH: u16 = 58;
-const VOICE_BUTTON_HEIGHT: u16 = 24;
-const VOICE_BUTTON_GAP: i16 = 3;
-const VOICE_COLUMNS: i16 = 5;
+/// 声を選ぶコンボボックスの大きさ。スピーカーの音量スライダーと
+/// 同じ行に並べるため、スライダーはその分だけ幅を譲る。
+const VOICE_COMBO_WIDTH: u16 = 96;
+const VOICE_COMBO_HEIGHT: u16 = 22;
+const VOICE_COMBO_GAP: i16 = 6;
 
-const ICON_COLOR: Color = Color::new(200, 210, 220);
+/// 閉じるボタンの一辺。
+const CLOSE_BUTTON_SIZE: u16 = 20;
+
 const READY_COLOR: Color = Color::new(90, 200, 120);
 const ERROR_COLOR: Color = Color::new(230, 90, 70);
 const PENDING_COLOR: Color = Color::new(120, 190, 255);
-const VOICE_SELECTED_COLOR: Color = Color::new(235, 130, 40);
-const VOICE_IDLE_COLOR: Color = Color::new(60, 70, 80);
 
 /// アイコンとして使うLVGLシンボルの種別。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -115,18 +117,15 @@ pub struct SliderSpec {
     pub value: i32,
 }
 
-/// 声を選ぶボタン1個。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct VoiceOption {
-    pub voice: &'static str,
-    pub area: Rect,
-    pub selected: bool,
-}
-
-/// 声を選ぶ一覧。話す相手（RealtimeSession）の準備ができたときだけ現れる。
+/// 声を選ぶコンボボックス。話す相手（RealtimeSession）の準備ができ、
+/// スピーカーの行が描かれたときだけ現れる。当たり判定・開閉・選択の
+/// 描画は LVGL の `lv_dropdown` にまかせ、ここでは配置と選択肢だけを持つ。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VoicePicker {
-    pub options: Vec<VoiceOption>,
+    pub area: Rect,
+    pub options: &'static [&'static str],
+    /// `options` の中で選択中の位置。
+    pub selected_index: usize,
 }
 
 /// 設定画面ひとコマ分の配置。
@@ -135,12 +134,15 @@ pub struct SettingsLayout {
     pub background: Color,
     pub rows: Vec<StatusRow>,
     pub voice_picker: Option<VoicePicker>,
+    /// アシスタント画面へ戻るための閉じるボタン。常に右上に置く。
+    pub close_button: Rect,
 }
 
 /// 設定画面の配置を決める。
 ///
 /// `current_voice` は選択中の声。`SUPPORTED_VOICES` に含まれない値が渡された
-/// 場合でも一覧はそのまま描き、どれも選択済み扱いにしない。
+/// 場合でも一覧はそのまま描き、先頭の声を選択中として扱う（`Config::validate()`
+/// を通った設定は必ず `SUPPORTED_VOICES` に含まれるため、実際には起こらない）。
 /// `speaker_volume`（百分率）と `mic_gain_db`（dB）は、それぞれの行が
 /// 準備完了になったときにスライダーへ渡す現在値。
 pub fn lay_out_settings(
@@ -150,10 +152,12 @@ pub fn lay_out_settings(
     mic_gain_db: u8,
 ) -> SettingsLayout {
     let entries = statuses.entries();
+    let realtime_ready = statuses.realtime_session.is_ready();
     let mut rows = Vec::with_capacity(entries.len());
+    let mut voice_picker = None;
 
     for (index, (module, status)) in entries.iter().enumerate() {
-        let y = MARGIN + index as i16 * ROW_HEIGHT as i16;
+        let y = HEADER_HEIGHT + MARGIN + index as i16 * ROW_HEIGHT as i16;
         let icon = Rect {
             x: MARGIN,
             y: y + (ROW_HEIGHT as i16 - ICON_SIZE as i16) / 2,
@@ -175,7 +179,30 @@ pub fn lay_out_settings(
             height: BADGE_SIZE,
         };
 
-        let slider = status.is_ready().then(|| slider_of(*module, message_area, speaker_volume, mic_gain_db)).flatten();
+        // 声のコンボボックスは、スピーカーの行にだけ音量スライダーと並べて置く。
+        let show_combo = *module == Module::Speaker && realtime_ready;
+        if show_combo {
+            voice_picker = Some(VoicePicker {
+                area: combo_area(message_area),
+                options: &SUPPORTED_VOICES,
+                selected_index: SUPPORTED_VOICES
+                    .iter()
+                    .position(|voice| *voice == current_voice)
+                    .unwrap_or(0),
+            });
+        }
+        let slider_width = if show_combo {
+            message_area
+                .width
+                .saturating_sub(VOICE_COMBO_WIDTH + VOICE_COMBO_GAP as u16)
+        } else {
+            message_area.width
+        };
+
+        let slider = status
+            .is_ready()
+            .then(|| slider_of(*module, message_area, slider_width, speaker_volume, mic_gain_db))
+            .flatten();
         let message = if slider.is_some() { String::new() } else { message_of(status) };
 
         rows.push(StatusRow {
@@ -190,30 +217,38 @@ pub fn lay_out_settings(
         });
     }
 
-    let realtime_ready = statuses.realtime_session.is_ready();
-    let voice_picker = realtime_ready.then(|| VoicePicker {
-        options: lay_out_voice_options(entries.len(), current_voice),
-    });
+    let close_button = Rect {
+        x: SCREEN_WIDTH - MARGIN - CLOSE_BUTTON_SIZE as i16,
+        y: (HEADER_HEIGHT - CLOSE_BUTTON_SIZE as i16) / 2,
+        width: CLOSE_BUTTON_SIZE,
+        height: CLOSE_BUTTON_SIZE,
+    };
 
     SettingsLayout {
         background: Color::new(12, 16, 24),
         rows,
         voice_picker,
+        close_button,
     }
 }
 
-/// タップ位置がどの声のボタンに当たるか。当たらなければ `None`。
-pub fn voice_at(layout: &SettingsLayout, at: Point) -> Option<&'static str> {
-    let picker = layout.voice_picker.as_ref()?;
-    picker
-        .options
-        .iter()
-        .find(|option| contains(&option.area, at))
-        .map(|option| option.voice)
+/// タップ位置が閉じるボタンに当たったか。
+pub fn close_button_at(layout: &SettingsLayout, at: Point) -> bool {
+    contains(&layout.close_button, at)
 }
 
 fn contains(rect: &Rect, at: Point) -> bool {
     (rect.x..rect.right()).contains(&at.x) && (rect.y..rect.bottom()).contains(&at.y)
+}
+
+/// スピーカーの状態文の位置のうち、右端をコンボボックスに割り当てる。
+fn combo_area(message_area: Rect) -> Rect {
+    Rect {
+        x: message_area.right() - VOICE_COMBO_WIDTH as i16,
+        y: message_area.y + (message_area.height as i16 - VOICE_COMBO_HEIGHT as i16) / 2,
+        width: VOICE_COMBO_WIDTH,
+        height: VOICE_COMBO_HEIGHT,
+    }
 }
 
 /// 画面は英語の短い単語だけを出す。何が起きてどう直すかの詳しい理由は
@@ -229,11 +264,18 @@ fn message_of(status: &ModuleStatus) -> String {
 }
 
 /// 準備完了になった行のうち、スピーカー・マイクだけにスライダーを与える。
-fn slider_of(module: Module, message_area: Rect, speaker_volume: u8, mic_gain_db: u8) -> Option<SliderSpec> {
+/// `width` はコンボボックスと並べる分だけ削られていることがある。
+fn slider_of(
+    module: Module,
+    message_area: Rect,
+    width: u16,
+    speaker_volume: u8,
+    mic_gain_db: u8,
+) -> Option<SliderSpec> {
     let area = Rect {
         x: message_area.x,
         y: message_area.y + (message_area.height as i16 - SLIDER_HEIGHT as i16) / 2,
-        width: message_area.width,
+        width,
         height: SLIDER_HEIGHT,
     };
 
@@ -260,46 +302,6 @@ fn color_of(status: &ModuleStatus) -> Color {
         ModuleStatus::Ready => READY_COLOR,
         ModuleStatus::Error => ERROR_COLOR,
     }
-}
-
-fn lay_out_voice_options(row_count: usize, current_voice: &str) -> Vec<VoiceOption> {
-    let top = MARGIN + row_count as i16 * ROW_HEIGHT as i16 + MARGIN;
-
-    SUPPORTED_VOICES
-        .iter()
-        .enumerate()
-        .map(|(index, voice)| {
-            let column = index as i16 % VOICE_COLUMNS;
-            let row = index as i16 / VOICE_COLUMNS;
-            let x = MARGIN + column * (VOICE_BUTTON_WIDTH as i16 + VOICE_BUTTON_GAP);
-            let y = top + row * (VOICE_BUTTON_HEIGHT as i16 + VOICE_BUTTON_GAP);
-
-            VoiceOption {
-                voice,
-                area: Rect {
-                    x,
-                    y,
-                    width: VOICE_BUTTON_WIDTH,
-                    height: VOICE_BUTTON_HEIGHT,
-                },
-                selected: *voice == current_voice,
-            }
-        })
-        .collect()
-}
-
-/// ボタンの塗り色。選択中は強調色にする。
-pub fn voice_button_color(option: &VoiceOption) -> Color {
-    if option.selected {
-        VOICE_SELECTED_COLOR
-    } else {
-        VOICE_IDLE_COLOR
-    }
-}
-
-#[allow(dead_code)]
-fn icon_default_color() -> Color {
-    ICON_COLOR
 }
 
 #[cfg(test)]
@@ -341,9 +343,8 @@ mod tests {
             assert!(row.badge.right() <= SCREEN_WIDTH);
         }
         let picker = layout.voice_picker.expect("realtime is ready");
-        for option in &picker.options {
-            assert!(option.area.x >= 0 && option.area.right() <= SCREEN_WIDTH);
-        }
+        assert!(picker.area.x >= 0 && picker.area.right() <= SCREEN_WIDTH);
+        assert!(layout.close_button.x >= 0 && layout.close_button.right() <= SCREEN_WIDTH);
     }
 
     /// モジュール数が少ない標準構成（WebSearch無効）では、声の一覧まで
@@ -352,11 +353,10 @@ mod tests {
     fn typical_layout_without_web_search_fits_the_screen_height() {
         let layout = layout_of(&ready_statuses(), "marin");
 
-        let picker = layout.voice_picker.expect("realtime is ready");
-        let lowest = picker
-            .options
+        let lowest = layout
+            .rows
             .iter()
-            .map(|option| option.area.bottom())
+            .map(|row| row.message_area.bottom())
             .max()
             .unwrap_or(0);
         assert!(lowest <= SCREEN_HEIGHT);
@@ -387,26 +387,26 @@ mod tests {
         let layout = layout_of(&ready_statuses(), "cedar");
         let picker = layout.voice_picker.expect("realtime is ready");
 
-        assert_eq!(picker.options.len(), SUPPORTED_VOICES.len());
-        let selected: Vec<_> = picker
-            .options
-            .iter()
-            .filter(|option| option.selected)
-            .map(|option| option.voice)
-            .collect();
-        assert_eq!(selected, vec!["cedar"]);
+        assert_eq!(picker.options, SUPPORTED_VOICES);
+        assert_eq!(picker.options[picker.selected_index], "cedar");
     }
 
     #[test]
-    fn voice_at_hits_the_tapped_button_and_misses_elsewhere() {
-        let layout = layout_of(&ready_statuses(), "marin");
-        let picker = layout.voice_picker.as_ref().expect("realtime is ready");
-        let first = &picker.options[0];
-        let inside = Point::new(first.area.x + 1, first.area.y + 1);
-        let outside = Point::new(-5, -5);
+    fn voice_picker_defaults_to_the_first_option_for_an_unknown_voice() {
+        let layout = layout_of(&ready_statuses(), "does-not-exist");
+        let picker = layout.voice_picker.expect("realtime is ready");
 
-        assert_eq!(voice_at(&layout, inside), Some(first.voice));
-        assert_eq!(voice_at(&layout, outside), None);
+        assert_eq!(picker.selected_index, 0);
+    }
+
+    #[test]
+    fn close_button_hits_only_its_own_area() {
+        let layout = layout_of(&ready_statuses(), "marin");
+        let inside = Point::new(layout.close_button.x + 1, layout.close_button.y + 1);
+        let outside = Point::new(0, SCREEN_HEIGHT - 1);
+
+        assert!(close_button_at(&layout, inside));
+        assert!(!close_button_at(&layout, outside));
     }
 
     #[test]
@@ -494,5 +494,38 @@ mod tests {
                 assert!(slider.area.bottom() <= row.message_area.bottom());
             }
         }
+    }
+
+    #[test]
+    fn voice_combo_sits_beside_the_speaker_slider_without_overlap() {
+        let layout = layout_of(&ready_statuses(), "marin");
+
+        let speaker_row = layout
+            .rows
+            .iter()
+            .find(|row| row.icon_symbol == IconSymbol::Speaker)
+            .expect("speaker row exists");
+        let slider = speaker_row.slider.expect("speaker is ready");
+        let picker = layout.voice_picker.expect("realtime is ready");
+
+        assert!(slider.area.right() <= picker.area.x);
+        assert!(picker.area.right() <= speaker_row.message_area.right());
+    }
+
+    #[test]
+    fn speaker_slider_uses_the_full_width_when_the_combo_is_absent() {
+        let mut statuses = ready_statuses();
+        statuses.realtime_session = ModuleStatus::Checking;
+        let layout = layout_of(&statuses, "marin");
+
+        let speaker_row = layout
+            .rows
+            .iter()
+            .find(|row| row.icon_symbol == IconSymbol::Speaker)
+            .expect("speaker row exists");
+        let slider = speaker_row.slider.expect("speaker is ready");
+
+        assert_eq!(slider.area.width, speaker_row.message_area.width);
+        assert!(layout.voice_picker.is_none());
     }
 }

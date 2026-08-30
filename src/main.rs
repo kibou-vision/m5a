@@ -791,6 +791,9 @@ fn run(
         if let Some(reading) = settings_view.mic_gain() {
             runtime.adjust_mic_gain(reading.value, reading.released);
         }
+        if let Some(voice) = settings_view.voice_selection() {
+            runtime.select_voice(voice);
+        }
 
         let current_voice = runtime
             .config
@@ -856,8 +859,11 @@ fn run(
                             advance(&mut state, &mut runtime, event);
                             sync_screen_for_state(&mut screen, &state, &mut auto_return_to_assistant);
                         }
-                    } else if let Some(voice) = settings_layout::voice_at(&settings_snapshot, at) {
-                        runtime.select_voice(voice);
+                    } else if screen == Screen::Settings
+                        && settings_layout::close_button_at(&settings_snapshot, at)
+                    {
+                        // 閉じるボタンは、左から右へのスワイプと同じ行き先へ移すだけ。
+                        screen = screen::transition_screen(screen, ScreenEvent::SwipedToAssistant);
                     }
                 }
             }
