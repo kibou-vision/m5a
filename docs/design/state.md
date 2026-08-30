@@ -41,7 +41,7 @@ stateDiagram-v2
 
 **ボタンは押すだけで、押し続けなくてよい** — 録音の終わりはボタンの解放
 ではなく、`core::turn_detector::TurnDetector` が実際の声と沈黙から決める。
-声のあとに沈黙が3秒続けば `SpeechEnded`、声が一度も無いまま沈黙が続けば
+声のあとに沈黙が1.4秒続けば `SpeechEnded`、声が一度も無いまま沈黙が続けば
 `SpeechNotDetected` になり、どちらも `TalkReleased` は見ない
 （[音声対話](../spec/conversation.md)参照）。
 

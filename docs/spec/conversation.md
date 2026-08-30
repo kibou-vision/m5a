@@ -16,8 +16,8 @@
 1. ボタン押下 → 録音開始。押し続ける必要はない
 2. 実際に声が聞こえるまでは、録音してもサーバへは送らない
 3. 声が聞こえたら、以後の録音を順に `input_audio_buffer.append`（base64）で送る
-4. 声のあとの無音が3秒続いたら → `input_audio_buffer.commit` → `response.create`
-5. 声が一度も聞こえないまま無音が3秒続いたら → 何も送らず録音を終える
+4. 声のあとの無音が1.4秒続いたら → `input_audio_buffer.commit` → `response.create`
+5. 声が一度も聞こえないまま無音が1.4秒続いたら → 何も送らず録音を終える
 6. 応答中にボタン押下 → `response.cancel` して録音に戻る
 
 ## 音声の形式
