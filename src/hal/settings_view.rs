@@ -37,8 +37,6 @@ pub struct SettingsView {
     rows: [ModuleRow; MAX_ROWS],
     /// 声を選ぶコンボボックス。スピーカーの行にだけ並べて置く。
     voice_combo: *mut bsp::lv_obj_t,
-    /// アシスタント画面へ戻る閉じるボタン。
-    close_button: *mut bsp::lv_obj_t,
     applied: Option<SettingsLayout>,
     display_was_pressed: bool,
     speaker_was_pressed: bool,
@@ -73,8 +71,6 @@ impl SettingsView {
             });
 
             let voice_combo = make_combo(container);
-            let close_button = make_label(container);
-            bsp::lv_obj_set_style_text_font(close_button, &bsp::lv_font_montserrat_20, MAIN_PART);
 
             hide(container);
 
@@ -82,7 +78,6 @@ impl SettingsView {
                 container,
                 rows,
                 voice_combo,
-                close_button,
                 applied: None,
                 display_was_pressed: false,
                 speaker_was_pressed: false,
@@ -167,16 +162,6 @@ impl SettingsView {
             }
             None => hide(self.voice_combo),
         }
-
-        place(self.close_button, layout.close_button);
-        set_text(self.close_button, "\u{F00D}"); // LV_SYMBOL_CLOSE
-        bsp::lv_obj_set_style_text_color(self.close_button, color_of(TEXT_COLOR), MAIN_PART);
-        bsp::lv_obj_set_style_text_align(
-            self.close_button,
-            bsp::lv_text_align_t_LV_TEXT_ALIGN_CENTER,
-            MAIN_PART,
-        );
-        show(self.close_button);
     }
 }
 
@@ -299,10 +284,13 @@ unsafe fn make_container(parent: *mut bsp::lv_obj_t) -> *mut bsp::lv_obj_t {
         i32::from(m5a_core::layout::SCREEN_HEIGHT),
     );
     bsp::lv_obj_set_pos(container, 0, 0);
-    // 一覧が画面高さを超える構成（WebSearchを含む場合）もあるため、
-    // 縦方向のスクロールだけ許す。
-    bsp::lv_obj_set_scroll_dir(container, bsp::lv_dir_t_LV_DIR_VER);
-    bsp::lv_obj_remove_flag(container, bsp::lv_obj_flag_t_LV_OBJ_FLAG_CLICKABLE);
+    // 一覧はWebSearchを含む最大構成でも画面に収まるようレイアウトしてある
+    // （`core::settings_layout`）ため、スクロールは要らない。上下スワイプで
+    // 画面を切り替える都合上、誤ってスクロールとして拾われないよう禁止する。
+    bsp::lv_obj_remove_flag(
+        container,
+        bsp::lv_obj_flag_t_LV_OBJ_FLAG_CLICKABLE | bsp::lv_obj_flag_t_LV_OBJ_FLAG_SCROLLABLE,
+    );
 
     container
 }

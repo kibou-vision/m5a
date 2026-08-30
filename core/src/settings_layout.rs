@@ -4,16 +4,14 @@
 //! ここでは配置だけを純関数で決める。
 
 use crate::config::SUPPORTED_VOICES;
-use crate::layout::{Color, Point, Rect, SCREEN_WIDTH};
+use crate::layout::{Color, Rect, SCREEN_WIDTH};
 use crate::module_status::{Module, ModuleStatus, ModuleStatuses};
 
 /// 一覧の外側の余白。
 const MARGIN: i16 = 6;
-/// 画面いちばん上、閉じるボタンだけのための帯の高さ。
-const HEADER_HEIGHT: i16 = 20;
-/// モジュール1行分の高さ。標準構成（WebSearch無効・6行）なら、
-/// ヘッダーぶんを差し引いても画面高さ240に収まる大きさにしてある。
-const ROW_HEIGHT: u16 = 34;
+/// モジュール1行分の高さ。WebSearchを含む最大構成（7行）でも、
+/// スクロール無しで画面高さ240に収まる大きさにしてある。
+const ROW_HEIGHT: u16 = 32;
 /// アイコンの正方形の一辺。
 const ICON_SIZE: u16 = 26;
 /// アイコンと文字の間隔。
@@ -32,9 +30,9 @@ pub const SPEAKER_VOLUME_MAX: i32 = 100;
 /// （`m5a_core::audio::mic_gain_multiplier`）を表す。
 pub const MIC_GAIN_MIN: i32 = 0;
 pub const MIC_GAIN_MAX: i32 = 100;
-/// 画面の明るさスライダーの範囲（百分率）。下限を30%に留めているのは、
+/// 画面の明るさスライダーの範囲（百分率）。下限を10%に留めているのは、
 /// それ未満まで暗くすると実機で表示がほとんど見えなくなるため。
-pub const BRIGHTNESS_MIN: i32 = 30;
+pub const BRIGHTNESS_MIN: i32 = 10;
 pub const BRIGHTNESS_MAX: i32 = 100;
 
 /// 声を選ぶコンボボックスの大きさ。スピーカーの音量スライダーと
@@ -42,9 +40,6 @@ pub const BRIGHTNESS_MAX: i32 = 100;
 const VOICE_COMBO_WIDTH: u16 = 96;
 const VOICE_COMBO_HEIGHT: u16 = 22;
 const VOICE_COMBO_GAP: i16 = 6;
-
-/// 閉じるボタンの一辺。
-const CLOSE_BUTTON_SIZE: u16 = 20;
 
 const READY_COLOR: Color = Color::new(90, 200, 120);
 const ERROR_COLOR: Color = Color::new(230, 90, 70);
@@ -140,8 +135,6 @@ pub struct SettingsLayout {
     pub background: Color,
     pub rows: Vec<StatusRow>,
     pub voice_picker: Option<VoicePicker>,
-    /// アシスタント画面へ戻るための閉じるボタン。常に右上に置く。
-    pub close_button: Rect,
 }
 
 /// 設定画面の配置を決める。
@@ -164,7 +157,7 @@ pub fn lay_out_settings(
     let mut voice_picker = None;
 
     for (index, (module, status)) in entries.iter().enumerate() {
-        let y = HEADER_HEIGHT + MARGIN + index as i16 * ROW_HEIGHT as i16;
+        let y = MARGIN + index as i16 * ROW_HEIGHT as i16;
         let icon = Rect {
             x: MARGIN,
             y: y + (ROW_HEIGHT as i16 - ICON_SIZE as i16) / 2,
@@ -233,28 +226,11 @@ pub fn lay_out_settings(
         });
     }
 
-    let close_button = Rect {
-        x: SCREEN_WIDTH - MARGIN - CLOSE_BUTTON_SIZE as i16,
-        y: (HEADER_HEIGHT - CLOSE_BUTTON_SIZE as i16) / 2,
-        width: CLOSE_BUTTON_SIZE,
-        height: CLOSE_BUTTON_SIZE,
-    };
-
     SettingsLayout {
         background: Color::new(12, 16, 24),
         rows,
         voice_picker,
-        close_button,
     }
-}
-
-/// タップ位置が閉じるボタンに当たったか。
-pub fn close_button_at(layout: &SettingsLayout, at: Point) -> bool {
-    contains(&layout.close_button, at)
-}
-
-fn contains(rect: &Rect, at: Point) -> bool {
-    (rect.x..rect.right()).contains(&at.x) && (rect.y..rect.bottom()).contains(&at.y)
 }
 
 /// スピーカーの状態文の位置のうち、右端をコンボボックスに割り当てる。
@@ -368,14 +344,14 @@ mod tests {
         }
         let picker = layout.voice_picker.expect("realtime is ready");
         assert!(picker.area.x >= 0 && picker.area.right() <= SCREEN_WIDTH);
-        assert!(layout.close_button.x >= 0 && layout.close_button.right() <= SCREEN_WIDTH);
     }
 
-    /// モジュール数が少ない標準構成（WebSearch無効）では、声の一覧まで
-    /// 含めて画面の高さにも収まる。
+    /// WebSearchを含む最大構成（7行）でもスクロール無しで画面に収まる。
     #[test]
-    fn typical_layout_without_web_search_fits_the_screen_height() {
-        let layout = layout_of(&ready_statuses(), "marin");
+    fn every_row_fits_within_the_screen_height_even_with_web_search() {
+        let mut statuses = ready_statuses();
+        statuses.web_search = Some(ModuleStatus::Ready);
+        let layout = layout_of(&statuses, "marin");
 
         let lowest = layout
             .rows
@@ -424,16 +400,6 @@ mod tests {
     }
 
     #[test]
-    fn close_button_hits_only_its_own_area() {
-        let layout = layout_of(&ready_statuses(), "marin");
-        let inside = Point::new(layout.close_button.x + 1, layout.close_button.y + 1);
-        let outside = Point::new(0, SCREEN_HEIGHT - 1);
-
-        assert!(close_button_at(&layout, inside));
-        assert!(!close_button_at(&layout, outside));
-    }
-
-    #[test]
     fn error_status_shows_a_short_failed_label() {
         let mut statuses = ready_statuses();
         statuses.wifi = ModuleStatus::Error;
@@ -458,7 +424,7 @@ mod tests {
             .expect("display row exists");
         let slider = display_row.slider.expect("display is always ready");
         assert_eq!(slider.value, i32::from(BRIGHTNESS));
-        assert_eq!((slider.min, slider.max), (30, 100));
+        assert_eq!((slider.min, slider.max), (10, 100));
         assert!(display_row.message.is_empty());
 
         let speaker_row = layout

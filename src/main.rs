@@ -909,10 +909,6 @@ fn run(
                             advance(&mut state, &mut runtime, event);
                             sync_screen_for_state(&mut screen, &state, &mut auto_return_to_assistant);
                         }
-                    } else if screen == Screen::Settings
-                        && settings_layout::close_button_at(&settings_snapshot, at)
-                    {
-                        screen = screen::transition_screen(screen, ScreenEvent::CloseButtonPressed);
                     }
                 }
             }
@@ -993,22 +989,17 @@ fn run(
     }
 }
 
-/// 右から左へのスワイプでだけ設定画面へ切り替える。
-///
-/// 設定画面を閉じてアシスタント画面へ戻るのはスワイプでは行わない
-/// （閉じるボタンだけの役目にしてある）ため、逆方向のスワイプには
-/// 対応するきっかけが無い。
-fn screen_event_of(direction: SwipeDirection) -> Option<ScreenEvent> {
+/// 下方向のスワイプで設定画面へ、上方向のスワイプでアシスタント画面へ戻る。
+fn screen_event_of(direction: SwipeDirection) -> ScreenEvent {
     match direction {
-        SwipeDirection::Left => Some(ScreenEvent::SwipedToSettings),
-        SwipeDirection::Right => None,
+        SwipeDirection::Down => ScreenEvent::SwipedToSettings,
+        SwipeDirection::Up => ScreenEvent::SwipedToAssistant,
     }
 }
 
-/// スワイプが分かった時点で呼ぶ。設定画面を開く方向のスワイプなら
-/// 画面を切り替え、押した瞬間にアシスタント画面だったせいで
-/// 始まってしまっていた録音があれば、何も言わずに終えたことにして
-/// 静かに片付ける（この後始末は、画面が変わらない逆方向のスワイプでも行う）。
+/// スワイプが分かった時点で呼ぶ。画面を切り替え、押した瞬間に
+/// アシスタント画面だったせいで始まってしまっていた録音があれば、
+/// 何も言わずに終えたことにして静かに片付ける。
 fn handle_swipe(
     direction: SwipeDirection,
     screen: &mut Screen,
@@ -1020,12 +1011,12 @@ fn handle_swipe(
         advance(state, runtime, AppEvent::SpeechNotDetected);
     }
 
-    let Some(event) = screen_event_of(direction) else {
-        return;
-    };
-    // 自分で設定画面を開いたのだから、全モジュールが揃ったからと
-    // いって勝手に押し戻さない。
-    *auto_return_to_assistant = false;
+    let event = screen_event_of(direction);
+    if event == ScreenEvent::SwipedToSettings {
+        // 自分で設定画面を開いたのだから、全モジュールが揃ったからと
+        // いって勝手に押し戻さない。
+        *auto_return_to_assistant = false;
+    }
     *screen = screen::transition_screen(*screen, event);
 }
 
