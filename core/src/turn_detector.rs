@@ -14,7 +14,7 @@ pub const VOICE_THRESHOLD: u8 = 6;
 /// 沈黙がこの時間続いたら区切りとみなす。
 pub const SILENCE_TIMEOUT_MS: u32 = 1_400;
 /// 沈黙が訪れなくても、録音の長さがこれに達したら区切りとみなす。
-pub const MAX_DURATION_MS: u32 = 15_000;
+pub const MAX_DURATION_MS: u32 = 10_000;
 
 /// 沈黙が区切りの長さに達したときの判定。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
