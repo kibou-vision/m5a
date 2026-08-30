@@ -9,15 +9,25 @@ use crate::module_status::{Module, ModuleStatus, ModuleStatuses};
 
 /// 一覧の外側の余白。
 const MARGIN: i16 = 6;
-/// モジュール1行分の高さ。標準構成（WebSearch無効・最大5行）なら、
+/// モジュール1行分の高さ。標準構成（WebSearch無効・6行）なら、
 /// 声の一覧まで含めて画面高さ240に収まる大きさにしてある。
-const ROW_HEIGHT: u16 = 34;
+const ROW_HEIGHT: u16 = 29;
 /// アイコンの正方形の一辺。
 const ICON_SIZE: u16 = 26;
 /// アイコンと文字の間隔。
 const ICON_GAP: i16 = 8;
 /// バッジ（読込中／OK／警告）の一辺。
 const BADGE_SIZE: u16 = 14;
+
+/// スライダー本体の太さ。行の高さの中で縦方向に中央寄せする。
+const SLIDER_HEIGHT: u16 = 12;
+/// スピーカー音量スライダーの範囲（百分率）。`hal::audio` 側の
+/// クランプにも使うため公開する。
+pub const SPEAKER_VOLUME_MIN: i32 = 0;
+pub const SPEAKER_VOLUME_MAX: i32 = 100;
+/// マイク感度スライダーの範囲（dB）。
+pub const MIC_GAIN_MIN: i32 = 0;
+pub const MIC_GAIN_MAX: i32 = 42;
 
 /// 声を選ぶボタン1個の大きさ。`SUPPORTED_VOICES` は10種類あるため2段×5列で並べる。
 const VOICE_BUTTON_WIDTH: u16 = 58;
@@ -38,6 +48,7 @@ pub enum IconSymbol {
     Display,
     SdCard,
     Microphone,
+    Speaker,
     Wifi,
     RealtimeSession,
     WebSearch,
@@ -49,6 +60,7 @@ impl IconSymbol {
             Module::Display => Self::Display,
             Module::SdCard => Self::SdCard,
             Module::Microphone => Self::Microphone,
+            Module::Speaker => Self::Speaker,
             Module::Wifi => Self::Wifi,
             Module::RealtimeSession => Self::RealtimeSession,
             Module::WebSearch => Self::WebSearch,
@@ -86,8 +98,21 @@ pub struct StatusRow {
     pub badge: Rect,
     pub badge_symbol: BadgeSymbol,
     /// 準備できていれば空文字。エラーなら「何が起きたか＋どう直すか」。
+    /// スライダーがある行では、準備できた時点でこちらも空文字にする。
     pub message: String,
     pub color: Color,
+    /// スピーカー・マイクの行が準備完了になったときだけ現れる、
+    /// 音量・感度を変えるスライダー。`message` の位置を置き換える。
+    pub slider: Option<SliderSpec>,
+}
+
+/// アイコンの横、状態文の位置に置くスライダー。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SliderSpec {
+    pub area: Rect,
+    pub min: i32,
+    pub max: i32,
+    pub value: i32,
 }
 
 /// 声を選ぶボタン1個。
@@ -116,7 +141,14 @@ pub struct SettingsLayout {
 ///
 /// `current_voice` は選択中の声。`SUPPORTED_VOICES` に含まれない値が渡された
 /// 場合でも一覧はそのまま描き、どれも選択済み扱いにしない。
-pub fn lay_out_settings(statuses: &ModuleStatuses, current_voice: &str) -> SettingsLayout {
+/// `speaker_volume`（百分率）と `mic_gain_db`（dB）は、それぞれの行が
+/// 準備完了になったときにスライダーへ渡す現在値。
+pub fn lay_out_settings(
+    statuses: &ModuleStatuses,
+    current_voice: &str,
+    speaker_volume: u8,
+    mic_gain_db: u8,
+) -> SettingsLayout {
     let entries = statuses.entries();
     let mut rows = Vec::with_capacity(entries.len());
 
@@ -143,14 +175,18 @@ pub fn lay_out_settings(statuses: &ModuleStatuses, current_voice: &str) -> Setti
             height: BADGE_SIZE,
         };
 
+        let slider = status.is_ready().then(|| slider_of(*module, message_area, speaker_volume, mic_gain_db)).flatten();
+        let message = if slider.is_some() { String::new() } else { message_of(status) };
+
         rows.push(StatusRow {
             icon,
             icon_symbol: IconSymbol::of(*module),
             message_area,
             badge,
             badge_symbol: BadgeSymbol::of(status),
-            message: message_of(status),
+            message,
             color: color_of(status),
+            slider,
         });
     }
 
@@ -189,6 +225,32 @@ fn message_of(status: &ModuleStatus) -> String {
         ModuleStatus::Checking => "Checking...".to_string(),
         ModuleStatus::Ready => "Ready".to_string(),
         ModuleStatus::Error => "Failed".to_string(),
+    }
+}
+
+/// 準備完了になった行のうち、スピーカー・マイクだけにスライダーを与える。
+fn slider_of(module: Module, message_area: Rect, speaker_volume: u8, mic_gain_db: u8) -> Option<SliderSpec> {
+    let area = Rect {
+        x: message_area.x,
+        y: message_area.y + (message_area.height as i16 - SLIDER_HEIGHT as i16) / 2,
+        width: message_area.width,
+        height: SLIDER_HEIGHT,
+    };
+
+    match module {
+        Module::Speaker => Some(SliderSpec {
+            area,
+            min: SPEAKER_VOLUME_MIN,
+            max: SPEAKER_VOLUME_MAX,
+            value: i32::from(speaker_volume).clamp(SPEAKER_VOLUME_MIN, SPEAKER_VOLUME_MAX),
+        }),
+        Module::Microphone => Some(SliderSpec {
+            area,
+            min: MIC_GAIN_MIN,
+            max: MIC_GAIN_MAX,
+            value: i32::from(mic_gain_db).clamp(MIC_GAIN_MIN, MIC_GAIN_MAX),
+        }),
+        _ => None,
     }
 }
 
@@ -246,13 +308,22 @@ mod tests {
     use crate::layout::SCREEN_HEIGHT;
     use crate::module_status::ModuleStatuses;
 
+    /// テストで使う既定のスピーカー音量・マイク感度。
+    const VOLUME: u8 = 80;
+    const GAIN_DB: u8 = 36;
+
     fn ready_statuses() -> ModuleStatuses {
         let mut statuses = ModuleStatuses::booting();
         statuses.sd_card = ModuleStatus::Ready;
         statuses.microphone = ModuleStatus::Ready;
+        statuses.speaker = ModuleStatus::Ready;
         statuses.wifi = ModuleStatus::Ready;
         statuses.realtime_session = ModuleStatus::Ready;
         statuses
+    }
+
+    fn layout_of(statuses: &ModuleStatuses, current_voice: &str) -> SettingsLayout {
+        lay_out_settings(statuses, current_voice, VOLUME, GAIN_DB)
     }
 
     /// モジュールの数が多い（WebSearchを含む）場合、縦方向は画面高さを
@@ -262,7 +333,7 @@ mod tests {
     fn everything_stays_within_the_screen_width() {
         let mut statuses = ready_statuses();
         statuses.web_search = Some(ModuleStatus::Error);
-        let layout = lay_out_settings(&statuses, "marin");
+        let layout = layout_of(&statuses, "marin");
 
         for row in &layout.rows {
             assert!(row.icon.x >= 0 && row.icon.right() <= SCREEN_WIDTH);
@@ -279,7 +350,7 @@ mod tests {
     /// 含めて画面の高さにも収まる。
     #[test]
     fn typical_layout_without_web_search_fits_the_screen_height() {
-        let layout = lay_out_settings(&ready_statuses(), "marin");
+        let layout = layout_of(&ready_statuses(), "marin");
 
         let picker = layout.voice_picker.expect("realtime is ready");
         let lowest = picker
@@ -293,27 +364,27 @@ mod tests {
 
     #[test]
     fn web_search_row_appears_only_when_configured() {
-        let without_search = lay_out_settings(&ready_statuses(), "marin");
-        assert_eq!(without_search.rows.len(), 5);
+        let without_search = layout_of(&ready_statuses(), "marin");
+        assert_eq!(without_search.rows.len(), 6);
 
         let mut with_search = ready_statuses();
         with_search.web_search = Some(ModuleStatus::Ready);
-        let with_search = lay_out_settings(&with_search, "marin");
-        assert_eq!(with_search.rows.len(), 6);
+        let with_search = layout_of(&with_search, "marin");
+        assert_eq!(with_search.rows.len(), 7);
     }
 
     #[test]
     fn voice_picker_appears_only_when_realtime_session_is_ready() {
         let mut statuses = ready_statuses();
         statuses.realtime_session = ModuleStatus::Checking;
-        let layout = lay_out_settings(&statuses, "marin");
+        let layout = layout_of(&statuses, "marin");
 
         assert!(layout.voice_picker.is_none());
     }
 
     #[test]
     fn voice_picker_lists_every_supported_voice_and_marks_the_current_one() {
-        let layout = lay_out_settings(&ready_statuses(), "cedar");
+        let layout = layout_of(&ready_statuses(), "cedar");
         let picker = layout.voice_picker.expect("realtime is ready");
 
         assert_eq!(picker.options.len(), SUPPORTED_VOICES.len());
@@ -328,7 +399,7 @@ mod tests {
 
     #[test]
     fn voice_at_hits_the_tapped_button_and_misses_elsewhere() {
-        let layout = lay_out_settings(&ready_statuses(), "marin");
+        let layout = layout_of(&ready_statuses(), "marin");
         let picker = layout.voice_picker.as_ref().expect("realtime is ready");
         let first = &picker.options[0];
         let inside = Point::new(first.area.x + 1, first.area.y + 1);
@@ -342,7 +413,7 @@ mod tests {
     fn error_status_shows_a_short_failed_label() {
         let mut statuses = ready_statuses();
         statuses.wifi = ModuleStatus::Error;
-        let layout = lay_out_settings(&statuses, "marin");
+        let layout = layout_of(&statuses, "marin");
 
         let wifi_row = layout
             .rows
@@ -350,5 +421,78 @@ mod tests {
             .find(|row| row.icon_symbol == IconSymbol::Wifi)
             .expect("wifi row exists");
         assert_eq!(wifi_row.message, "Failed");
+    }
+
+    #[test]
+    fn speaker_and_microphone_show_a_slider_once_ready() {
+        let layout = layout_of(&ready_statuses(), "marin");
+
+        let speaker_row = layout
+            .rows
+            .iter()
+            .find(|row| row.icon_symbol == IconSymbol::Speaker)
+            .expect("speaker row exists");
+        let slider = speaker_row.slider.expect("speaker is ready");
+        assert_eq!(slider.value, i32::from(VOLUME));
+        assert_eq!((slider.min, slider.max), (0, 100));
+        assert!(speaker_row.message.is_empty());
+
+        let mic_row = layout
+            .rows
+            .iter()
+            .find(|row| row.icon_symbol == IconSymbol::Microphone)
+            .expect("microphone row exists");
+        let slider = mic_row.slider.expect("microphone is ready");
+        assert_eq!(slider.value, i32::from(GAIN_DB));
+        assert!(mic_row.message.is_empty());
+    }
+
+    #[test]
+    fn slider_is_absent_until_the_module_is_ready() {
+        let mut statuses = ready_statuses();
+        statuses.microphone = ModuleStatus::Checking;
+        statuses.speaker = ModuleStatus::Error;
+        let layout = layout_of(&statuses, "marin");
+
+        let mic_row = layout
+            .rows
+            .iter()
+            .find(|row| row.icon_symbol == IconSymbol::Microphone)
+            .expect("microphone row exists");
+        assert!(mic_row.slider.is_none());
+        assert_eq!(mic_row.message, "Checking...");
+
+        let speaker_row = layout
+            .rows
+            .iter()
+            .find(|row| row.icon_symbol == IconSymbol::Speaker)
+            .expect("speaker row exists");
+        assert!(speaker_row.slider.is_none());
+        assert_eq!(speaker_row.message, "Failed");
+    }
+
+    #[test]
+    fn other_rows_never_get_a_slider() {
+        let layout = layout_of(&ready_statuses(), "marin");
+
+        assert!(layout
+            .rows
+            .iter()
+            .filter(|row| !matches!(row.icon_symbol, IconSymbol::Speaker | IconSymbol::Microphone))
+            .all(|row| row.slider.is_none()));
+    }
+
+    #[test]
+    fn slider_area_stays_within_the_message_area() {
+        let layout = layout_of(&ready_statuses(), "marin");
+
+        for row in &layout.rows {
+            if let Some(slider) = row.slider {
+                assert!(slider.area.x >= row.message_area.x);
+                assert!(slider.area.right() <= row.message_area.right());
+                assert!(slider.area.y >= row.message_area.y);
+                assert!(slider.area.bottom() <= row.message_area.bottom());
+            }
+        }
     }
 }

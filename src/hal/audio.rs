@@ -45,9 +45,6 @@ const IDLE_SILENCE: Duration = Duration::from_millis(40);
 /// マイクを読み始めてからクロックが安定するまでの待ち。
 const CLOCK_SETTLE: Duration = Duration::from_millis(200);
 
-/// スピーカーの音量（百分率）。既定のままだと鳴らないため必ず設定する。
-const SPEAKER_VOLUME: i32 = 80;
-
 /// AW88298 の音量レジスタ。上位バイトが減衰量で、0 が最大、0.5dB 刻み。
 const VOLUME_REGISTER: i32 = 0x0C;
 /// 音量レジスタの下位バイト。コーデックの既定値に合わせる。
@@ -56,8 +53,6 @@ const VOLUME_FLAGS: i32 = 0x64;
 const BSP_PA_GAIN_DB: i32 = 15;
 /// 減衰量レジスタは 0.5dB ごとに 1 進む。
 const STEPS_PER_DB: i32 = 2;
-/// マイクの入力利得（dB）。小さいと子どもの声を拾えない。
-const MICROPHONE_GAIN_DB: f32 = 36.0;
 
 /// コーデックの取っ手。
 ///
@@ -88,6 +83,11 @@ pub struct Audio {
     /// 立てると、再生の仕事が待ち行列に溜まっている分を鳴らさずに捨てる。
     /// 割り込みで応答を打ち切ったとき、溜めておいた分が後から鳴るのを防ぐ。
     flush: Arc<AtomicBool>,
+    /// 望ましいマイクの感度（dB）。録音の仕事が毎回読み、変わっていれば
+    /// 掛け直す。設定画面のスライダーから実行中に変えられるようにするため。
+    mic_gain_db: Arc<AtomicU8>,
+    /// 望ましいスピーカーの音量（百分率）。仕組みは `mic_gain_db` と同じ。
+    speaker_volume: Arc<AtomicU8>,
 }
 
 impl Audio {
@@ -97,7 +97,7 @@ impl Audio {
     /// PLL がロックせず、以後どれだけ書き込んでも無音のままになる。
     /// そこで先にマイクを開いて読み始め、クロックが出ている状態を作ってから
     /// スピーカーを設定する。給電は BSP のコーデック初期化が行う。
-    pub fn start(format: AudioFormat) -> Result<Self> {
+    pub fn start(format: AudioFormat, speaker_volume: u8, mic_gain_db: u8) -> Result<Self> {
         // 既定の設定で全二重に開く。標本化周波数はコーデック側で決める。
         esp!(unsafe { bsp::bsp_audio_init(core::ptr::null()) }).context("音声を初期化できません")?;
 
@@ -105,10 +105,11 @@ impl Audio {
             unsafe { bsp::bsp_audio_codec_microphone_init() },
             "マイクを開けません",
         )?;
-        set_gain(&microphone, MICROPHONE_GAIN_DB);
+        set_gain(&microphone, f32::from(mic_gain_db));
 
         let capturing = Arc::new(AtomicBool::new(false));
         let input_level = Arc::new(AtomicU8::new(0));
+        let mic_gain = Arc::new(AtomicU8::new(mic_gain_db));
         let (captured_tx, captured) = sync_channel(CAPTURE_QUEUE_DEPTH);
         spawn_capture(
             microphone,
@@ -116,6 +117,7 @@ impl Audio {
             capturing.clone(),
             input_level.clone(),
             captured_tx,
+            mic_gain.clone(),
         )?;
 
         // 読み取りが始まってクロックが安定するのを待つ。
@@ -125,14 +127,23 @@ impl Audio {
             unsafe { bsp::bsp_audio_codec_speaker_init() },
             "スピーカーを開けません",
         )?;
-        set_volume(&speaker, SPEAKER_VOLUME);
+        set_volume(&speaker, i32::from(speaker_volume));
         restore_amplifier_gain(&speaker);
 
         let level = Arc::new(AtomicU8::new(0));
         let speaking = Arc::new(AtomicBool::new(false));
         let flush = Arc::new(AtomicBool::new(false));
+        let speaker_volume = Arc::new(AtomicU8::new(speaker_volume));
         let (to_play, playing) = sync_channel(PLAYBACK_QUEUE_DEPTH);
-        spawn_playback(speaker, format, level.clone(), speaking.clone(), flush.clone(), playing)?;
+        spawn_playback(
+            speaker,
+            format,
+            level.clone(),
+            speaking.clone(),
+            flush.clone(),
+            playing,
+            speaker_volume.clone(),
+        )?;
 
         Ok(Self {
             captured,
@@ -143,7 +154,19 @@ impl Audio {
             speaking,
             dropped: Arc::new(AtomicUsize::new(0)),
             flush,
+            mic_gain_db: mic_gain,
+            speaker_volume,
         })
+    }
+
+    /// マイクの感度を実行中に変える。設定画面のスライダー用。
+    pub fn set_mic_gain(&self, gain_db: u8) {
+        self.mic_gain_db.store(gain_db, Ordering::Relaxed);
+    }
+
+    /// スピーカーの音量を実行中に変える。設定画面のスライダー用。
+    pub fn set_speaker_volume(&self, percent: u8) {
+        self.speaker_volume.store(percent.min(100), Ordering::Relaxed);
     }
 
     /// 録音した音を送り出し始める。
@@ -278,14 +301,23 @@ fn spawn_capture(
     capturing: Arc<AtomicBool>,
     input_level: Arc<AtomicU8>,
     captured: SyncSender<Vec<u8>>,
+    mic_gain_db: Arc<AtomicU8>,
 ) -> Result<()> {
     thread::Builder::new()
         .stack_size(THREAD_STACK)
         .spawn(move || {
             let microphone = microphone;
             let mut samples = vec![0_i16; CHUNK_SAMPLES];
+            // 起動時にすでに掛けてある値と揃えておき、二重に設定し直さない。
+            let mut applied_gain = mic_gain_db.load(Ordering::Relaxed);
 
             loop {
+                let wanted_gain = mic_gain_db.load(Ordering::Relaxed);
+                if wanted_gain != applied_gain {
+                    set_gain(&microphone, f32::from(wanted_gain));
+                    applied_gain = wanted_gain;
+                }
+
                 let bytes = (samples.len() * 2) as i32;
                 let result = unsafe {
                     bsp::esp_codec_dev_read(microphone.0, samples.as_mut_ptr().cast(), bytes)
@@ -323,6 +355,7 @@ fn spawn_playback(
     speaking: Arc<AtomicBool>,
     flush: Arc<AtomicBool>,
     playing: Receiver<Vec<u8>>,
+    speaker_volume: Arc<AtomicU8>,
 ) -> Result<()> {
     thread::Builder::new()
         .stack_size(THREAD_STACK)
@@ -331,8 +364,17 @@ fn spawn_playback(
 
             let mut played = 0_usize;
             let silence_samples = DEVICE_RATE as usize * IDLE_SILENCE.as_millis() as usize / 1_000;
+            // 起動時にすでに掛けてある値と揃えておき、二重に設定し直さない。
+            let mut applied_volume = speaker_volume.load(Ordering::Relaxed);
 
             loop {
+                let wanted_volume = speaker_volume.load(Ordering::Relaxed);
+                if wanted_volume != applied_volume {
+                    set_volume(&speaker, i32::from(wanted_volume));
+                    restore_amplifier_gain(&speaker);
+                    applied_volume = wanted_volume;
+                }
+
                 if flush.swap(false, Ordering::Relaxed) {
                     while playing.try_recv().is_ok() {}
                     level.store(0, Ordering::Relaxed);

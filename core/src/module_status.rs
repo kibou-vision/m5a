@@ -10,6 +10,7 @@ pub enum Module {
     Display,
     SdCard,
     Microphone,
+    Speaker,
     Wifi,
     RealtimeSession,
     WebSearch,
@@ -42,6 +43,7 @@ pub struct ModuleStatuses {
     pub display: ModuleStatus,
     pub sd_card: ModuleStatus,
     pub microphone: ModuleStatus,
+    pub speaker: ModuleStatus,
     pub wifi: ModuleStatus,
     pub realtime_session: ModuleStatus,
     /// config.toml に検索用APIキーが無ければ一覧にも出さないため `None`。
@@ -59,6 +61,7 @@ impl ModuleStatuses {
             display: ModuleStatus::Ready,
             sd_card: ModuleStatus::NotChecked,
             microphone: ModuleStatus::NotChecked,
+            speaker: ModuleStatus::NotChecked,
             wifi: ModuleStatus::NotChecked,
             realtime_session: ModuleStatus::NotChecked,
             web_search: None,
@@ -72,6 +75,7 @@ impl ModuleStatuses {
             (Module::Display, &self.display),
             (Module::SdCard, &self.sd_card),
             (Module::Microphone, &self.microphone),
+            (Module::Speaker, &self.speaker),
             (Module::Wifi, &self.wifi),
             (Module::RealtimeSession, &self.realtime_session),
         ];
@@ -114,6 +118,7 @@ mod tests {
         let mut statuses = ModuleStatuses::booting();
         statuses.sd_card = ready();
         statuses.microphone = ready();
+        statuses.speaker = ready();
         statuses.wifi = ready();
         statuses.realtime_session = ready();
 
@@ -129,6 +134,7 @@ mod tests {
         let mut statuses = ModuleStatuses::booting();
         statuses.sd_card = ready();
         statuses.microphone = ready();
+        statuses.speaker = ready();
         statuses.wifi = ready();
         statuses.realtime_session = ready();
         statuses.web_search = Some(ModuleStatus::Checking);
@@ -147,6 +153,18 @@ mod tests {
         statuses.wifi = error();
         statuses.realtime_session = ready();
 
+        assert!(!statuses.all_ready());
+    }
+
+    #[test]
+    fn speaker_not_ready_prevents_all_ready() {
+        let mut statuses = ModuleStatuses::booting();
+        statuses.sd_card = ready();
+        statuses.microphone = ready();
+        statuses.wifi = ready();
+        statuses.realtime_session = ready();
+
+        assert_eq!(statuses.speaker, ModuleStatus::NotChecked);
         assert!(!statuses.all_ready());
     }
 }

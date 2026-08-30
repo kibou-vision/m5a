@@ -21,7 +21,7 @@ classDiagram
 
   class Module {
     <<enum>>
-    Display / SdCard / Microphone
+    Display / SdCard / Microphone / Speaker
     Wifi / RealtimeSession / WebSearch
   }
 
@@ -35,10 +35,24 @@ classDiagram
     +all_ready() bool
   }
 
+  class StatusRow {
+    +message: String
+    +slider: Option~SliderSpec~
+  }
+
+  class SliderSpec {
+    +area: Rect
+    +min: i32
+    +max: i32
+    +value: i32
+  }
+
   class SettingsLayout {
     +rows: Vec~StatusRow~
     +voice_picker: Option~VoicePicker~
   }
+
+  StatusRow --> SliderSpec : マイク・スピーカーがReadyの間だけ持つ
 
   class SettingsView {
     実機のLVGL部品
@@ -70,6 +84,7 @@ classDiagram
 | 画面 | 常に `Ready` 固定。描画できている時点で動いているとみなす（起動できなければ設定画面自体を出せないため、失敗は検出できない既知の制約） |
 | SDカード | 起動時は `sd_card_status()`（`settings: Result<Config, ConfigError>` から判定）。実行中は `Runtime::flush_logs()` の書き込み失敗で `Error` へ（自動でやり直す仕組みは無い） |
 | マイク | `Runtime::open_audio()`。起動時に一度だけ試すのみで、失敗したら再試行はしない |
+| スピーカー | マイクと同じ `Runtime::open_audio()`（`hal::audio::Audio::start()` が両方を一度に開くため、成否も同時に決まる） |
 | WiFi | `Runtime::connect_network()`。開始時に `Checking`、成功で `Ready`。失敗しても `Error` にはせず `Checking` のまま留める（後述） |
 | 話す相手 | `Runtime::open_session()` で `Checking` にする。実際に `Ready` になるのは `ServerEvent::SessionConfigured` を受けた `Runtime::receive()`。失敗しても `Error` にはせず `Checking` のまま留める（後述） |
 | インターネット検索 | `Runtime::new()` で `config.search.api_key()` の有無だけを見て決める（実際の疎通確認はしない） |
@@ -98,9 +113,11 @@ WiFi・話す相手は失敗しても `AppState::Recovering` を経て
 `core/src/settings_layout.rs::lay_out_settings()` が、[顔と画面](../spec/face.md)
 と同じ考え方で「どこに何を置くか」だけを純関数で決める。モジュールの数
 （インターネット検索の有無）によって縦の長さが変わるため、標準構成
-（検索なし・最大5行＋声の一覧）は画面の高さ240pxに収まるようにし、
-検索を含む6行構成では画面をスクロールして見せる
+（検索なし・6行＋声の一覧）は画面の高さ240pxに収まるようにし、
+検索を含む7行構成では画面をスクロールして見せる
 （`hal::settings_view::SettingsView` がコンテナに縦スクロールを許可する）。
+スピーカー行を足した際に標準構成でも収まらなくなったため、
+1行の高さ（`ROW_HEIGHT`）を34pxから29pxに詰めている。
 
 各行はアイコンと状態文だけを持ち、モジュール名の文字は出さない。
 アイコンだけでどのモジュールかは伝わるため、別に名前を添える
@@ -120,6 +137,39 @@ Rust 側に複製する形をとった。既定の 14px フォントでは小さ
 純関数として行い、`main.rs` はタッチが離れた座標をそのまま渡すだけで
 どのボタンに当たったかを得る。当たったら `Runtime::select_voice()` が
 `Config` を更新しつつ `core::config::save_voice()` で SDカードへ書き戻す。
+
+## スピーカー音量・マイク感度のスライダー
+
+声のボタンとは違い、ドラッグという連続した操作を扱うため、当たり判定を
+自前で書かず LVGL 標準の `lv_slider` ウィジェットにまかせている。
+つまみの描画・ドラッグの追従は LVGL 自身のタスクが行い、こちらは
+値の読み書きだけを行う。
+
+**ライブ反映と保存の分離** — ドラッグ中は毎コマ値を読み、実際の音量・
+感度（`hal::audio::Audio::set_speaker_volume()`/`set_mic_gain()`）へは
+即座に反映する一方、`/.m5a/config.toml` への書き込みは指を離した瞬間
+だけに絞る。毎コマSDカードへ書き込むと、書き込み回数がドラッグの
+コマ数（1回のドラッグで数十回）ぶん膨らみ、SDカードの摩耗と処理落ちの
+原因になるため。指を離した瞬間は `lv_obj_has_state(slider, LV_STATE_PRESSED)`
+の変化（真→偽）を毎コマ見て検出する（`hal::settings_view::read_slider()`）。
+
+**コーデックの取っ手は録音・再生の仕事スレッドの中にある** —
+`Audio::start()` はマイク・スピーカーの取っ手（`Codec`）をそれぞれの
+仕事スレッドへ渡しきってしまうため、`Audio` 自身は直接
+`esp_codec_dev_set_in_gain`/`set_out_vol` を呼べない。そこで
+`Arc<AtomicU8>` で「望ましい値」を共有し、各スレッドが自分のループの
+中で値の変化を見つけたときにだけコーデックへ書き込む
+（`hal::audio::spawn_capture`/`spawn_playback`）。
+
+**この一コマの描画に間に合わせる** — `main.rs::run()` は、この一コマの
+`SettingsLayout` を作る前に `SettingsView::speaker_volume()`/`mic_gain()`
+でつまみの現在値を読み、`Runtime::adjust_speaker_volume()`/
+`adjust_mic_gain()` で `Config` に反映してからレイアウトを作る。
+順序を逆にすると、この一コマの描画がまだ古い値のまま作られ、
+`SettingsView::apply()` がドラッグ中のつまみを一つ前の値へ
+引き戻してしまう（[レイアウトと描画](#レイアウトと描画)の
+`apply()` は配置が変わったときだけ書き戻す設計と組み合わさって、
+本来は無害なはずの書き戻しが一コマ遅れると悪さをする）。
 
 ## スワイプ判定
 

@@ -9,19 +9,30 @@ use std::ffi::CString;
 use esp_idf_svc::sys::bsp;
 use m5a_core::layout::{Color, Rect};
 use m5a_core::settings_layout::{
-    self, BadgeSymbol, IconSymbol, SettingsLayout, StatusRow, VoiceOption,
+    self, BadgeSymbol, IconSymbol, SettingsLayout, SliderSpec, StatusRow, VoiceOption,
 };
 
 /// 一覧表示できるモジュールの最大数。[`Module`] の種類数に合わせる。
-const MAX_ROWS: usize = 6;
+const MAX_ROWS: usize = 7;
 /// [`m5a_core::config::SUPPORTED_VOICES`] の数。
 const MAX_VOICE_BUTTONS: usize = 10;
 
 const MAIN_PART: u32 = 0;
+const INDICATOR_PART: u32 = bsp::lv_part_t_LV_PART_INDICATOR;
+const KNOB_PART: u32 = bsp::lv_part_t_LV_PART_KNOB;
 const OPAQUE: u8 = 255;
 
 const TEXT_COLOR: Color = Color::new(230, 235, 240);
 const VOICE_TEXT_COLOR: Color = Color::new(240, 240, 240);
+/// スライダーの色。準備完了を示す色と揃える。
+const SLIDER_COLOR: Color = Color::new(90, 200, 120);
+
+/// スライダーを読み取った結果。
+pub struct SliderReading {
+    pub value: i32,
+    /// 指を離した直後で、SDカードへ保存してよいタイミング。
+    pub released: bool,
+}
 
 /// 画面に置かれた設定画面。
 pub struct SettingsView {
@@ -30,12 +41,15 @@ pub struct SettingsView {
     rows: [ModuleRow; MAX_ROWS],
     voice_buttons: [*mut bsp::lv_obj_t; MAX_VOICE_BUTTONS],
     applied: Option<SettingsLayout>,
+    speaker_was_pressed: bool,
+    mic_was_pressed: bool,
 }
 
 struct ModuleRow {
     icon: *mut bsp::lv_obj_t,
     message: *mut bsp::lv_obj_t,
     badge: *mut bsp::lv_obj_t,
+    slider: *mut bsp::lv_obj_t,
 }
 
 impl SettingsView {
@@ -54,6 +68,7 @@ impl SettingsView {
                     icon,
                     message: make_label(container),
                     badge: make_label(container),
+                    slider: make_slider(container),
                 }
             });
 
@@ -66,8 +81,34 @@ impl SettingsView {
                 rows,
                 voice_buttons,
                 applied: None,
+                speaker_was_pressed: false,
+                mic_was_pressed: false,
             }
         }
+    }
+
+    /// スピーカー音量スライダーの現在値。表示されていなければ `None`。
+    pub fn speaker_volume(&mut self) -> Option<SliderReading> {
+        let slider = self.slider_of(IconSymbol::Speaker)?;
+        Some(unsafe { read_slider(slider, &mut self.speaker_was_pressed) })
+    }
+
+    /// マイク感度スライダーの現在値。表示されていなければ `None`。
+    pub fn mic_gain(&mut self) -> Option<SliderReading> {
+        let slider = self.slider_of(IconSymbol::Microphone)?;
+        Some(unsafe { read_slider(slider, &mut self.mic_was_pressed) })
+    }
+
+    /// 直前に反映したレイアウトから、指定したモジュールの行が
+    /// いま持っているスライダーの部品を探す。
+    fn slider_of(&self, symbol: IconSymbol) -> Option<*mut bsp::lv_obj_t> {
+        let index = self
+            .applied
+            .as_ref()?
+            .rows
+            .iter()
+            .position(|row| row.icon_symbol == symbol && row.slider.is_some())?;
+        Some(self.rows[index].slider)
     }
 
     /// 直前と同じ配置なら `apply` は何もしない仕組みのため、隠している
@@ -122,10 +163,20 @@ unsafe fn write_row(row: &ModuleRow, status_row: &StatusRow) {
     bsp::lv_obj_set_style_text_color(row.icon, color_of(TEXT_COLOR), MAIN_PART);
     show(row.icon);
 
-    place(row.message, status_row.message_area);
-    set_text(row.message, &status_row.message);
-    bsp::lv_obj_set_style_text_color(row.message, color_of(status_row.color), MAIN_PART);
-    show(row.message);
+    // スライダーがある行では、状態文の代わりにスライダーを見せる。
+    match status_row.slider {
+        Some(slider) => {
+            hide(row.message);
+            write_slider(row.slider, slider);
+        }
+        None => {
+            hide(row.slider);
+            place(row.message, status_row.message_area);
+            set_text(row.message, &status_row.message);
+            bsp::lv_obj_set_style_text_color(row.message, color_of(status_row.color), MAIN_PART);
+            show(row.message);
+        }
+    }
 
     place(row.badge, status_row.badge);
     set_text(row.badge, badge_glyph(status_row.badge_symbol));
@@ -137,6 +188,34 @@ unsafe fn hide_row(row: &ModuleRow) {
     hide(row.icon);
     hide(row.message);
     hide(row.badge);
+    hide(row.slider);
+}
+
+/// スライダーの位置・範囲・値を反映する。
+///
+/// ドラッグ中は毎コマ `apply` から呼ばれる（値が動くたびにレイアウトも
+/// 変わるため）。ただし `main.rs` はこのコマの描画を作る前に
+/// `SettingsView::speaker_volume`/`mic_gain` でつまみの現在値を読み、
+/// それを渡した上でレイアウトを作り直しているため、ここで書き戻す値は
+/// つまみが今まさに指している値と一致する。つまみの動きを妨げない。
+unsafe fn write_slider(slider: *mut bsp::lv_obj_t, spec: SliderSpec) {
+    place(slider, spec.area);
+    bsp::lv_slider_set_range(slider, spec.min, spec.max);
+    bsp::lv_slider_set_value(slider, spec.value, false);
+    show(slider);
+}
+
+/// スライダーの現在値と、指を離した直後かどうかを返す。
+/// 隠れている間は指を離した扱いにし、再表示時に誤検知しないようにする。
+unsafe fn read_slider(slider: *mut bsp::lv_obj_t, was_pressed: &mut bool) -> SliderReading {
+    let pressed = bsp::lv_obj_has_state(slider, bsp::lv_state_t_LV_STATE_PRESSED);
+    let released = *was_pressed && !pressed;
+    *was_pressed = pressed;
+
+    SliderReading {
+        value: bsp::lv_slider_get_value(slider),
+        released,
+    }
 }
 
 unsafe fn write_voice_button(button: *mut bsp::lv_obj_t, option: &VoiceOption) {
@@ -169,6 +248,18 @@ unsafe fn make_label(parent: *mut bsp::lv_obj_t) -> *mut bsp::lv_obj_t {
     hide(label);
 
     label
+}
+
+/// 音量・感度を変えるスライダーを作る。ドラッグの検出・つまみの描画は
+/// LVGL の `lv_slider` にまかせ、ここでは色と初期状態だけを整える。
+unsafe fn make_slider(parent: *mut bsp::lv_obj_t) -> *mut bsp::lv_obj_t {
+    let slider = bsp::lv_slider_create(parent);
+
+    bsp::lv_obj_set_style_bg_color(slider, color_of(SLIDER_COLOR), INDICATOR_PART);
+    bsp::lv_obj_set_style_bg_color(slider, color_of(SLIDER_COLOR), KNOB_PART);
+    hide(slider);
+
+    slider
 }
 
 /// 設定画面全体をまとめる、画面いっぱいの入れ物を作る。
@@ -223,6 +314,7 @@ fn icon_glyph(symbol: IconSymbol) -> &'static str {
         IconSymbol::Display => "\u{F03E}",         // LV_SYMBOL_IMAGE
         IconSymbol::SdCard => "\u{F7C2}",           // LV_SYMBOL_SD_CARD
         IconSymbol::Microphone => "\u{F001}",       // LV_SYMBOL_AUDIO
+        IconSymbol::Speaker => "\u{F028}",          // LV_SYMBOL_VOLUME_MAX
         IconSymbol::Wifi => "\u{F1EB}",             // LV_SYMBOL_WIFI
         IconSymbol::RealtimeSession => "\u{F095}",  // LV_SYMBOL_CALL
         IconSymbol::WebSearch => "\u{F124}",        // LV_SYMBOL_GPS

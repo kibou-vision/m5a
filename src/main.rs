@@ -93,7 +93,8 @@ fn main() -> Result<()> {
 /// SDカードの読み込みなどが終わる前に、まず設定画面を一度描いておく。
 fn show_booting_screen(view: &mut FaceView, settings_view: &mut SettingsView) {
     let statuses = m5a_core::module_status::ModuleStatuses::booting();
-    let placement = settings_layout::lay_out_settings(&statuses, "");
+    // 起動直後はどのモジュールも準備できていないため、スライダーの初期値は使われない。
+    let placement = settings_layout::lay_out_settings(&statuses, "", 0, 0);
 
     let _lock = DisplayLock::acquire();
     view.hide();
@@ -266,14 +267,20 @@ impl Runtime {
             return;
         };
 
-        match Audio::start(config.openai.audio_format) {
+        match Audio::start(
+            config.openai.audio_format,
+            config.audio.speaker_volume,
+            config.audio.mic_gain_db,
+        ) {
             Ok(audio) => {
                 self.audio = Some(audio);
                 self.module_statuses.microphone = ModuleStatus::Ready;
+                self.module_statuses.speaker = ModuleStatus::Ready;
             }
             Err(error) => {
                 log::warn!("音を使えません: {error:#}");
                 self.module_statuses.microphone = ModuleStatus::Error;
+                self.module_statuses.speaker = ModuleStatus::Error;
             }
         }
     }
@@ -660,6 +667,63 @@ impl Runtime {
             log::info!("声を保存しました: {voice}");
         }
     }
+
+    /// スライダーで変えたスピーカー音量を反映する。
+    ///
+    /// ドラッグ中は毎コマ呼ばれるため、鳴らす側への反映はそのたびに行うが、
+    /// SDカードへの書き込みは指を離した瞬間（`persist`）だけにする。
+    /// 毎コマ書き込むとSDカードの摩耗と処理落ちの原因になる。
+    fn adjust_speaker_volume(&mut self, percent: i32, persist: bool) {
+        let Some(config) = self.config.as_mut() else {
+            return;
+        };
+        let percent = percent
+            .clamp(
+                settings_layout::SPEAKER_VOLUME_MIN,
+                settings_layout::SPEAKER_VOLUME_MAX,
+            ) as u8;
+
+        if config.audio.speaker_volume != percent {
+            config.audio.speaker_volume = percent;
+            if let Some(audio) = self.audio.as_ref() {
+                audio.set_speaker_volume(percent);
+            }
+        }
+
+        if persist {
+            if let Err(error) = config::save_speaker_volume(&mut self.storage, percent) {
+                log::warn!("音量を保存できません: {}", error.describe());
+            } else {
+                log::info!("音量を保存しました: {percent}%");
+            }
+        }
+    }
+
+    /// スライダーで変えたマイクの感度を反映する。書き込みの間引きは
+    /// [`Self::adjust_speaker_volume`] と同じ理由による。
+    fn adjust_mic_gain(&mut self, gain_db: i32, persist: bool) {
+        let Some(config) = self.config.as_mut() else {
+            return;
+        };
+        let gain_db = gain_db
+            .clamp(settings_layout::MIC_GAIN_MIN, settings_layout::MIC_GAIN_MAX)
+            as u8;
+
+        if config.audio.mic_gain_db != gain_db {
+            config.audio.mic_gain_db = gain_db;
+            if let Some(audio) = self.audio.as_ref() {
+                audio.set_mic_gain(gain_db);
+            }
+        }
+
+        if persist {
+            if let Err(error) = config::save_mic_gain_db(&mut self.storage, gain_db) {
+                log::warn!("マイクの感度を保存できません: {}", error.describe());
+            } else {
+                log::info!("マイクの感度を保存しました: {gain_db} dB");
+            }
+        }
+    }
 }
 
 /// SDカードの読み書きに関わる設定エラーだけを、SDカードの不調として扱う。
@@ -718,13 +782,32 @@ fn run(
         let elapsed_ms = (now_ms - last_now_ms) as u32;
         last_now_ms = now_ms;
 
+        // スライダーの値を settings_snapshot の計算より先に取り込む。
+        // 後にすると、この一コマの描画がまだ古い値のまま作られ、
+        // ドラッグ中のつまみが古い位置へ引き戻されて見えてしまう。
+        if let Some(reading) = settings_view.speaker_volume() {
+            runtime.adjust_speaker_volume(reading.value, reading.released);
+        }
+        if let Some(reading) = settings_view.mic_gain() {
+            runtime.adjust_mic_gain(reading.value, reading.released);
+        }
+
         let current_voice = runtime
             .config
             .as_ref()
             .map(|config| config.openai.voice.as_str())
             .unwrap_or_default();
-        let settings_snapshot =
-            settings_layout::lay_out_settings(&runtime.module_statuses, current_voice);
+        let (speaker_volume, mic_gain_db) = runtime
+            .config
+            .as_ref()
+            .map(|config| (config.audio.speaker_volume, config.audio.mic_gain_db))
+            .unwrap_or_default();
+        let settings_snapshot = settings_layout::lay_out_settings(
+            &runtime.module_statuses,
+            current_voice,
+            speaker_volume,
+            mic_gain_db,
+        );
 
         if let Some(change) = touch.poll() {
             idle_since_ms = now_ms;

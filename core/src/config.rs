@@ -77,6 +77,14 @@ audio_format = "ulaw"
 #
 # Tavily (https://www.tavily.com/) で無料のアカウントを作成できます
 api_key = ""
+
+[audio]
+# スピーカーの音量 (0〜100)。設定画面のスライダーからも変えられます。
+speaker_volume = 80
+
+# マイクの感度 (dB)。小さいと声を拾いにくくなります。
+# 設定画面のスライダーからも変えられます。
+mic_gain_db = 36
 "#;
 
 /// 音声のやりとりに使う形式。
@@ -147,6 +155,26 @@ pub struct OpenAiConfig {
     pub audio_format: AudioFormat,
 }
 
+/// スピーカーとマイクの音量・感度。設定画面のスライダーで変えられる。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AudioConfig {
+    /// スピーカーの音量（百分率）。
+    #[serde(default = "default_speaker_volume")]
+    pub speaker_volume: u8,
+    /// マイクの入力感度（dB）。
+    #[serde(default = "default_mic_gain_db")]
+    pub mic_gain_db: u8,
+}
+
+impl Default for AudioConfig {
+    fn default() -> Self {
+        Self {
+            speaker_volume: default_speaker_volume(),
+            mic_gain_db: default_mic_gain_db(),
+        }
+    }
+}
+
 /// web検索の設定。記入は任意で、無ければ検索の機能そのものを使わない。
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SearchConfig {
@@ -173,6 +201,8 @@ pub struct Config {
     pub openai: OpenAiConfig,
     #[serde(default)]
     pub search: SearchConfig,
+    #[serde(default)]
+    pub audio: AudioConfig,
 }
 
 fn default_age() -> u8 {
@@ -189,6 +219,14 @@ fn default_model() -> String {
 
 fn default_voice() -> String {
     DEFAULT_VOICE.to_string()
+}
+
+fn default_speaker_volume() -> u8 {
+    80
+}
+
+fn default_mic_gain_db() -> u8 {
+    36
 }
 
 /// 設定内容の不備。いずれも親がファイルを直せば回復する。
@@ -381,12 +419,35 @@ fn create_template<S: Storage>(storage: &mut S) -> Result<(), ConfigError> {
 /// 親が書いたコメントやレイアウトを壊さないよう、TOML全体を作り直すのではなく
 /// `[openai]` セクション内の `voice = "..."` 行だけを置き換える。
 pub fn save_voice<S: Storage>(storage: &mut S, voice: &str) -> Result<(), ConfigError> {
+    save_toml_line(storage, "openai", "voice", &format!("voice = \"{voice}\""))
+}
+
+/// スピーカーの音量を `config.toml` に書き戻す。
+pub fn save_speaker_volume<S: Storage>(storage: &mut S, percent: u8) -> Result<(), ConfigError> {
+    save_toml_line(storage, "audio", "speaker_volume", &format!("speaker_volume = {percent}"))
+}
+
+/// マイクの感度を `config.toml` に書き戻す。
+pub fn save_mic_gain_db<S: Storage>(storage: &mut S, gain_db: u8) -> Result<(), ConfigError> {
+    save_toml_line(storage, "audio", "mic_gain_db", &format!("mic_gain_db = {gain_db}"))
+}
+
+/// 親が書いたコメントやレイアウトを壊さないよう、TOML全体を作り直すのではなく
+/// 指定したセクション内の該当行だけを置き換える。
+fn save_toml_line<S: Storage>(
+    storage: &mut S,
+    section: &str,
+    key: &str,
+    new_line: &str,
+) -> Result<(), ConfigError> {
     let source = storage
         .read_text(CONFIG_PATH)
         .map_err(ConfigError::Unreadable)?;
 
-    let updated = replace_openai_voice_line(&source, voice).ok_or_else(|| ConfigError::Malformed {
-        detail: "[openai] の voice の行が見つかりません".to_string(),
+    let updated = replace_toml_line(&source, section, key, new_line).ok_or_else(|| {
+        ConfigError::Malformed {
+            detail: format!("[{section}] の {key} の行が見つかりません"),
+        }
     })?;
 
     storage
@@ -403,10 +464,11 @@ pub fn save_voice<S: Storage>(storage: &mut S, voice: &str) -> Result<(), Config
     Ok(())
 }
 
-/// `[openai]` セクション内の `voice = "..."` 行だけを置き換える。
+/// 指定したセクション内の `key = ...` 行だけを置き換える。
 /// 他の項目・コメント・空行はそのまま残す。
-fn replace_openai_voice_line(source: &str, voice: &str) -> Option<String> {
-    let mut in_openai_section = false;
+fn replace_toml_line(source: &str, section: &str, key: &str, new_line: &str) -> Option<String> {
+    let target_section = format!("[{section}]");
+    let mut in_target_section = false;
     let mut replaced = false;
     let mut lines: Vec<String> = Vec::new();
 
@@ -414,12 +476,11 @@ fn replace_openai_voice_line(source: &str, voice: &str) -> Option<String> {
         let trimmed = line.trim();
 
         if trimmed.starts_with('[') && trimmed.ends_with(']') {
-            in_openai_section = trimmed == "[openai]";
-        } else if in_openai_section && trimmed.starts_with("voice") {
-            let after_key = trimmed["voice".len()..].trim_start();
-            if let Some(rest) = after_key.strip_prefix('=') {
-                let _ = rest; // 値そのものは使わず、行全体を作り直す。
-                lines.push(format!("voice = \"{voice}\""));
+            in_target_section = trimmed == target_section;
+        } else if in_target_section && trimmed.starts_with(key) {
+            let after_key = trimmed[key.len()..].trim_start();
+            if after_key.starts_with('=') {
+                lines.push(new_line.to_string());
                 replaced = true;
                 continue;
             }
@@ -649,6 +710,60 @@ mod tests {
         let mut storage = MemoryStorage::with_file(CONFIG_PATH, "[child]\nname = \"はると\"\n");
 
         let result = save_voice(&mut storage, "cedar");
+
+        assert!(matches!(result, Err(ConfigError::Malformed { .. })));
+    }
+
+    #[test]
+    fn audio_settings_default_when_absent() {
+        let config = load_config(&mut MemoryStorage::with_file(CONFIG_PATH, &filled_source()))
+            .expect("記入済みなら読めるはず");
+
+        assert_eq!(config.audio.speaker_volume, 80);
+        assert_eq!(config.audio.mic_gain_db, 36);
+    }
+
+    #[test]
+    fn audio_settings_can_be_customized() {
+        let source = filled_source()
+            .replace("speaker_volume = 80", "speaker_volume = 60")
+            .replace("mic_gain_db = 36", "mic_gain_db = 30");
+
+        let config = parse_config(&source).expect("記入済みなら読めるはず");
+
+        assert_eq!(config.audio.speaker_volume, 60);
+        assert_eq!(config.audio.mic_gain_db, 30);
+    }
+
+    #[test]
+    fn save_speaker_volume_replaces_only_that_line() {
+        let mut storage = MemoryStorage::with_file(CONFIG_PATH, &filled_source());
+
+        save_speaker_volume(&mut storage, 45).expect("音量を保存できるはず");
+
+        let stored = storage.peek(CONFIG_PATH).expect("書き戻されているはず");
+        let config = parse_config(stored).expect("書き戻した内容も読めるはず");
+        assert_eq!(config.audio.speaker_volume, 45);
+        assert_eq!(config.audio.mic_gain_db, 36);
+    }
+
+    #[test]
+    fn save_mic_gain_db_replaces_only_that_line() {
+        let mut storage = MemoryStorage::with_file(CONFIG_PATH, &filled_source());
+
+        save_mic_gain_db(&mut storage, 20).expect("感度を保存できるはず");
+
+        let stored = storage.peek(CONFIG_PATH).expect("書き戻されているはず");
+        let config = parse_config(stored).expect("書き戻した内容も読めるはず");
+        assert_eq!(config.audio.mic_gain_db, 20);
+        assert_eq!(config.audio.speaker_volume, 80);
+    }
+
+    #[test]
+    fn save_speaker_volume_fails_when_audio_section_is_missing() {
+        let mut storage = MemoryStorage::with_file(CONFIG_PATH, "[child]\nname = \"はると\"\n");
+
+        let result = save_speaker_volume(&mut storage, 50);
 
         assert!(matches!(result, Err(ConfigError::Malformed { .. })));
     }
