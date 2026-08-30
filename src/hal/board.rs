@@ -62,35 +62,88 @@ pub fn touch_device() -> *mut bsp::lv_indev_t {
     unsafe { bsp::bsp_display_get_input_dev() }
 }
 
-/// 電源を落とす（実際には deep sleep で代用する）。
+/// AXP2101 の I2C アドレス。内部 I2C バス（`init_bus()` が立ち上げる）に
+/// BSP と相乗りする。同じアドレスに複数の `i2c_master_dev_handle_t` を
+/// 持つこと自体はドライバ側で禁止されていない
+/// （`esp_driver_i2c` は登録済みアドレスの重複を検査しない）。
+const AXP2101_I2C_ADDR: u16 = 0x34;
+/// AXP2101 の「共通設定」レジスタ。bit0 に1を立てると、RTC用の電源
+/// （VRTC）を除くすべてのレールを切る（AXP2101 データシート、および
+/// 実機で使われている `lewisxhe/XPowersLib` の `shutdown()` 実装を参照）。
+const AXP2101_REG_COMMON_CONFIG: u8 = 0x10;
+const AXP2101_SOFT_OFF_BIT: u8 = 0x01;
+
+/// 電源を落とす。
 ///
-/// AXP2101 の「共通設定」レジスタ（0x10）の bit0 を立てて本体ごと電源を
-/// 切る方式も試したが、それ以前に**毎回別の原因でクラッシュしてリブート
-/// していた**ことが実機のパニックログで判明した。`bsp_display_enter_sleep()`
-/// は内部でタッチパネルもスリープさせようとするが、この機種のタッチ
-/// ドライバはスリープに対応しておらず`ESP_FAIL`を返す。BSP側はこれを
-/// `ESP_ERROR_CHECK`で無条件に`abort()`させる実装になっているため、
-/// `bsp_display_enter_sleep()`を呼ぶたびに必ずパニック→リブートしていた
-/// （詳細は [CoreS3 の制約](../../docs/design/hardware.md) 参照）。
-/// そのためパネルのスリープは諦め、`bsp_display_backlight_off()`による
-/// バックライト消灯だけで画面を暗くする。
+/// バックライトを消したあと AXP2101 自身に
+/// [`AXP2101_REG_COMMON_CONFIG`] のシャットダウンビットを立てさせ、
+/// VRTC 以外のレール（ESP32-S3 本体の電源も含む）を実際に切る。
+/// 復帰には実機の電源ボタンでの起動が要る。
 ///
-/// 電源を切る方式は `esp_deep_sleep_start()` による代用とする。起床要因は
-/// 一切設定しないため、目覚めは実機の電源ボタンによる起動に任せる。
-///
-/// `bsp_sdcard_unmount()` はここでは呼ばない。LCDパネルと同じ SPI バス
-/// （SPI3_HOST）を使っているため、パネルの SPI デバイスが生きたまま
-/// バスを `bsp_spi_deinit()` で丸ごと解放しようとすると
-/// `spi_bus_free` が `ESP_ERR_INVALID_STATE`（CSが残っている）で失敗し、
-/// これも `ESP_ERROR_CHECK` で無条件に `abort()` する（実機で確認済み。
-/// 詳細は [CoreS3 の制約](../../docs/design/hardware.md) 参照）。設定や
+/// `bsp_display_enter_sleep()`（パネル休止）と `bsp_sdcard_unmount()`
+/// （SDカードの安全な取り外し）はどちらもここでは呼ばない。前者は
+/// この機種のタッチドライバがスリープ非対応で必ずパニックし、後者は
+/// LCDパネルと同じ SPI バス（SPI3_HOST）を使っているためパネルの
+/// SPI デバイスが生きたままバスを解放しようとして必ずパニックする
+/// （どちらも実機で確認済み。詳細は
+/// [CoreS3 の制約](../../docs/design/hardware.md) 参照）。設定や
 /// ログの保存は `hal::storage::SdStorage` が書き込むたびに
-/// `File::sync_all()` で同期しているため、ここで改めてアンマウントする
-/// 必要はない。
+/// `File::sync_all()` で同期しているため、SDカードのアンマウントを
+/// 諦めても実害はない。
+///
+/// AXP2101 と通信できなかった場合だけ、保険として
+/// `esp_deep_sleep_start()` にも落とす（起床要因は設定しないため、
+/// 通常は電源ボタンでの再起動が要る点は変わらない）。
 pub fn power_off() -> ! {
     unsafe { bsp::bsp_display_backlight_off() };
 
+    if let Err(error) = axp2101_shutdown() {
+        log::warn!("AXP2101に電源を切らせられません（{error:#}）。deep sleepで代替します");
+    }
+
+    // AXP2101 のシャットダウンが成功していれば、この呼び出しへ実際に
+    // たどり着く前に電源が切れる。ここに来るとすれば、切れるまでの
+    // 一瞬の待ちか、AXP2101と通信できなかったときの保険。
     unsafe { esp_idf_svc::sys::esp_deep_sleep_start() }
+}
+
+/// AXP2101 自身にシャットダウンさせる。
+///
+/// BSP は AXP2101 用の取っ手を内部（`bsp_feature_en.c`）に静的に持つが
+/// 外へは公開していないため、同じアドレスへ自分の取っ手を新たに作って使う。
+fn axp2101_shutdown() -> Result<()> {
+    let bus = unsafe { bsp::bsp_i2c_get_handle() };
+
+    let config = bsp::i2c_device_config_t {
+        dev_addr_length: bsp::i2c_addr_bit_len_t_I2C_ADDR_BIT_LEN_7,
+        device_address: AXP2101_I2C_ADDR,
+        scl_speed_hz: 100_000,
+        scl_wait_us: 0,
+        flags: Default::default(),
+    };
+    let mut device: bsp::i2c_master_dev_handle_t = std::ptr::null_mut();
+    esp!(unsafe { bsp::i2c_master_bus_add_device(bus, &config, &mut device) })
+        .context("AXP2101を掴めません")?;
+
+    // 他のビットを保ったまま立てるため、読んでから書き戻す。
+    let mut current = [0_u8; 1];
+    esp!(unsafe {
+        bsp::i2c_master_transmit_receive(
+            device,
+            [AXP2101_REG_COMMON_CONFIG].as_ptr(),
+            1,
+            current.as_mut_ptr(),
+            1,
+            1_000,
+        )
+    })
+    .context("AXP2101のレジスタを読めません")?;
+
+    let updated = [AXP2101_REG_COMMON_CONFIG, current[0] | AXP2101_SOFT_OFF_BIT];
+    esp!(unsafe { bsp::i2c_master_transmit(device, updated.as_ptr(), updated.len(), 1_000) })
+        .context("AXP2101に電源を切らせられません")?;
+
+    Ok(())
 }
 
 /// いま使える内部メモリの様子。
