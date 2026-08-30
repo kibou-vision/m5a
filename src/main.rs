@@ -101,7 +101,10 @@ fn main() -> Result<()> {
 /// SDカードの読み込みなどが終わる前に、まず設定画面を一度描いておく。
 fn show_booting_screen(view: &mut FaceView, settings_view: &mut SettingsView) {
     let statuses = m5a_core::module_status::ModuleStatuses::booting();
-    // 起動直後はどのモジュールも準備できていないため、スライダーの初期値は使われない。
+    // 画面（Display）だけは常にReadyなため、明るさスライダーはこの時点で
+    // すでに出る。ここではまだ設定を読めておらず本当の値を知らないため
+    // 0を仮の値として渡すが、`run()` が設定を読み終えた直後に本物の値で
+    // 上書きするため実害はない（`run()` 冒頭のコメント参照）。
     let placement = settings_layout::lay_out_settings(&statuses, "", 0, 0, 0);
 
     let _lock = DisplayLock::acquire();
@@ -817,6 +820,15 @@ fn run(
     sync_screen_for_state(&mut screen, &state, &mut auto_return_to_assistant);
     log::info!("画面の準備ができました");
 
+    // ここで一度、読み込んだ設定に基づく本物の配置を反映しておく。
+    // `show_booting_screen()` はまだ設定を読めていない時点で明るさ0の
+    // 仮の配置を当てているため、ここで上書きしないと、ループの最初の
+    // コマで明るさスライダーを読み取った際に「まだ仮の値のまま」の
+    // つまみを本物の値と誤認し、明るさが読み込んだ値ではなく
+    // スライダーの下限まで巻き戻ってしまう
+    // （`BRIGHTNESS_MIN` へのクランプで顕在化した実機の不具合）。
+    settings_view.apply(&lay_out_current_settings(&runtime));
+
     loop {
         let now_ms = uptime_ms();
         let elapsed_ms = (now_ms - last_now_ms) as u32;
@@ -838,29 +850,7 @@ fn run(
             runtime.select_voice(voice);
         }
 
-        let current_voice = runtime
-            .config
-            .as_ref()
-            .map(|config| config.openai.voice.as_str())
-            .unwrap_or_default();
-        let (brightness, speaker_volume, mic_gain) = runtime
-            .config
-            .as_ref()
-            .map(|config| {
-                (
-                    config.display.brightness,
-                    config.audio.speaker_volume,
-                    config.audio.mic_gain,
-                )
-            })
-            .unwrap_or_default();
-        let settings_snapshot = settings_layout::lay_out_settings(
-            &runtime.module_statuses,
-            current_voice,
-            brightness,
-            speaker_volume,
-            mic_gain,
-        );
+        let settings_snapshot = lay_out_current_settings(&runtime);
 
         if let Some(change) = touch.poll() {
             idle_since_ms = now_ms;
@@ -1018,6 +1008,34 @@ fn handle_swipe(
         *auto_return_to_assistant = false;
     }
     *screen = screen::transition_screen(*screen, event);
+}
+
+/// `Runtime` が持つ設定から、いまの設定画面の配置を決める。
+fn lay_out_current_settings(runtime: &Runtime) -> settings_layout::SettingsLayout {
+    let current_voice = runtime
+        .config
+        .as_ref()
+        .map(|config| config.openai.voice.as_str())
+        .unwrap_or_default();
+    let (brightness, speaker_volume, mic_gain) = runtime
+        .config
+        .as_ref()
+        .map(|config| {
+            (
+                config.display.brightness,
+                config.audio.speaker_volume,
+                config.audio.mic_gain,
+            )
+        })
+        .unwrap_or_default();
+
+    settings_layout::lay_out_settings(
+        &runtime.module_statuses,
+        current_voice,
+        brightness,
+        speaker_volume,
+        mic_gain,
+    )
 }
 
 /// 設定不備や失敗に入った瞬間、問答無用で設定画面へ切り替える。
