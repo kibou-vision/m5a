@@ -15,6 +15,7 @@ use m5a_core::gesture::{self, SwipeDirection};
 use m5a_core::guardrail::{Guardrail, Verdict};
 use m5a_core::layout::{self, Point};
 use m5a_core::logbook::{self, LogEntry, Speaker};
+use m5a_core::memory::{self, Memory};
 use m5a_core::module_status::ModuleStatus;
 use m5a_core::ports::StorageError;
 use m5a_core::realtime::{self, ServerEvent, SessionSetup};
@@ -156,6 +157,10 @@ struct Runtime {
     /// 会話中は SD の DMA バッファを確保できないため、待機に戻ってから書く。
     pending_logs: Vec<LogEntry>,
     storage: SdStorage,
+    /// アシスタントが覚えている内容。次回起動時のセッション指示文に載せる。
+    memory: Memory,
+    /// 記憶が更新され、SDカードへの書き出しを待っている。
+    memory_dirty: bool,
     /// 進行中のweb検索。呼び出しのcall_idと、結果を待つ受け口。
     pending_search: Option<(String, Receiver<Option<String>>)>,
     /// サーバーからは応答終了の知らせが届いたが、まだ再生しきっていない分がある。
@@ -184,6 +189,9 @@ impl Runtime {
             }
         }
 
+        let storage = SdStorage::new();
+        let memory = memory::load(&storage);
+
         Self {
             config,
             guardrail,
@@ -195,7 +203,9 @@ impl Runtime {
             audio: None,
             spoken: String::new(),
             pending_logs: Vec::new(),
-            storage: SdStorage::new(),
+            storage,
+            memory,
+            memory_dirty: false,
             pending_search: None,
             finishing_response: false,
             turn: None,
@@ -262,8 +272,9 @@ impl Runtime {
             }
             AppAction::PowerOff => {
                 log::info!("しばらく操作が無かったため電源を落とします");
-                // 電源が切れる前に、たまっているログを失わないようにする。
+                // 電源が切れる前に、たまっているログと記憶を失わないようにする。
                 self.flush_logs();
+                self.flush_memory();
                 board::power_off();
             }
         }
@@ -338,17 +349,19 @@ impl Runtime {
         let config = self.config.as_ref()?;
         let guardrail = self.guardrail.as_ref()?;
 
-        let tools = if config.search.api_key().is_some() {
-            vec![search::tool_definition()]
-        } else {
-            Vec::new()
-        };
+        let mut tools = memory::tool_definitions();
+        if config.search.api_key().is_some() {
+            tools.push(search::tool_definition());
+        }
+
+        let mut instructions = guardrail.build_instructions();
+        instructions.push_str(&self.memory.build_instructions_fragment());
 
         let setup = SessionSetup {
             model: config.openai.model.clone(),
             voice: config.openai.voice.clone(),
             audio_format: config.openai.audio_format,
-            instructions: guardrail.build_instructions(),
+            instructions,
             tools,
         };
 
@@ -571,14 +584,18 @@ impl Runtime {
         self.record(Speaker::System, reply);
     }
 
-    /// モデルからの function tool 呼び出しを受け、検索を始めるか、
-    /// その場で「わからない」を返す。
+    /// モデルからの function tool 呼び出しを、名前に応じて振り分ける。
     fn handle_tool_call(&mut self, call_id: &str, name: &str, arguments: &str) {
-        if name != search::TOOL_NAME {
-            self.finish_tool_call(call_id, "それはできません");
-            return;
+        match name {
+            search::TOOL_NAME => self.handle_search_call(call_id, arguments),
+            memory::REMEMBER_TOPIC_TOOL => self.handle_remember_topic(call_id, arguments),
+            memory::REMEMBER_SUMMARY_TOOL => self.handle_remember_summary(call_id, arguments),
+            _ => self.finish_tool_call(call_id, "それはできません"),
         }
+    }
 
+    /// web検索を始めるか、その場で「わからない」を返す。
+    fn handle_search_call(&mut self, call_id: &str, arguments: &str) {
         let Some(api_key) = self.config.as_ref().and_then(|config| config.search.api_key())
         else {
             self.finish_tool_call(call_id, "今は調べられません");
@@ -596,6 +613,32 @@ impl Runtime {
         board::report_memory("web検索の直前");
         let request = search::build_request(&query, api_key);
         self.pending_search = Some((call_id.to_string(), hal::search::spawn(request)));
+    }
+
+    /// 短期記憶に話題を1件足す。書き出しは待機に戻ってから（`flush_memory`）。
+    fn handle_remember_topic(&mut self, call_id: &str, arguments: &str) {
+        let Some(topic) = memory::extract_topic(arguments) else {
+            self.finish_tool_call(call_id, "うまく覚えられませんでした");
+            return;
+        };
+
+        log::info!("記憶（短期）: {topic}");
+        self.memory.remember_topic(&topic);
+        self.memory_dirty = true;
+        self.finish_tool_call(call_id, "おぼえました");
+    }
+
+    /// 長期記憶を書き換える。書き出しは待機に戻ってから（`flush_memory`）。
+    fn handle_remember_summary(&mut self, call_id: &str, arguments: &str) {
+        let Some(summary) = memory::extract_summary(arguments) else {
+            self.finish_tool_call(call_id, "うまく覚えられませんでした");
+            return;
+        };
+
+        log::info!("記憶（長期）を更新しました");
+        self.memory.remember_summary(&summary);
+        self.memory_dirty = true;
+        self.finish_tool_call(call_id, "おぼえました");
     }
 
     /// 検索スレッドの結果が届いていれば、会話へ差し戻す。
@@ -656,6 +699,25 @@ impl Runtime {
                 return;
             }
         }
+    }
+
+    /// 更新済みの記憶を SD カードへ書き出す。理由は [`Self::flush_logs`] と同じ。
+    fn flush_memory(&mut self) {
+        if !self.memory_dirty {
+            return;
+        }
+
+        let headroom = board::dma_headroom();
+        if headroom < SD_WRITE_HEADROOM {
+            return;
+        }
+
+        if let Err(error) = memory::save(&mut self.storage, &self.memory) {
+            log::warn!("記憶を残せません: {error}");
+            self.module_statuses.sd_card = ModuleStatus::Error;
+            return;
+        }
+        self.memory_dirty = false;
     }
 
     /// 設定画面で選ばれた声を反映し、SDカードへ書き戻す。
@@ -925,9 +987,10 @@ fn run(
             sync_screen_for_state(&mut screen, &state, &mut auto_return_to_assistant);
         }
 
-        // 待機に戻ったときだけ、たまったログを書き出す余裕がある。
+        // 待機に戻ったときだけ、たまったログと記憶を書き出す余裕がある。
         if state == AppState::Ready {
             runtime.flush_logs();
+            runtime.flush_memory();
         }
 
         retry_at = schedule_retry(&state, retry_at, now_ms);

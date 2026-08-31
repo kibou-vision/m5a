@@ -13,7 +13,7 @@ graph LR
     FW -->|トレイト実装を渡す| CORE
   end
 
-  SD[("microSD<br>/.m5a/config.toml<br>/.m5a/logs/")]
+  SD[("microSD<br>/.m5a/config.toml<br>/.m5a/logs/<br>/.m5a/memory.toml")]
   Router["Wi-Fi ルータ"]
   API["OpenAI Realtime API<br>gpt-realtime-2.1-mini"]
   PC["親のPC"]
@@ -100,6 +100,15 @@ classDiagram
     +parse_response(body) Option~String~
   }
 
+  class Memory {
+    +short_term: Vec~String~
+    +long_term: String
+    +tool_definitions() Vec~Value~
+    +remember_topic(topic)
+    +remember_summary(summary)
+    +build_instructions_fragment() String
+  }
+
   class FaceAnimator {
     +set_expression(e)
     +set_voice_level(level)
@@ -157,6 +166,9 @@ classDiagram
   Guardrail --> SessionSetup : 指示文
   SearchQuery --> SessionSetup : tool定義
   ServerEvent --> SearchQuery : ToolCallRequested
+  Memory --> SessionSetup : tool定義・指示文の断片
+  ServerEvent --> Memory : ToolCallRequested
+  Memory ..> Storage : 読み書き
   AppState --> FaceAnimator : 表情を決める
   FaceAnimator --> FaceFrame : 生成
   ServerEvent --> LogEntry : 文字起こしを記録
@@ -181,6 +193,7 @@ classDiagram
 | `guardrail` | 指示文の組み立てと、文字起こしの検査 |
 | `realtime` | Realtime API の電文の組み立てと解析 |
 | `search` | web検索（Tavily）の tool 定義・リクエストの組み立て・結果の解析 |
+| `memory` | 記憶（短期・長期）の tool 定義・更新・指示文への組み込み・読み書き |
 | `audio` | μ-law 変換、標本化周波数の変換、音量の算出 |
 | `logbook` | 会話ログの整形と追記 |
 | `screen` | アシスタント画面／設定画面のどちらを見せるかを決める |
