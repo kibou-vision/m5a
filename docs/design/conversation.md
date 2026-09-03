@@ -45,6 +45,7 @@ sequenceDiagram
   participant Search as core::search
   participant HalSearch as hal::search
   participant Tavily as Tavily
+  participant Mem as core::memory
 
   Child->>Touch: 画面を押す
   Touch->>Main: Pressed
@@ -89,6 +90,15 @@ sequenceDiagram
     HalSearch->>Tavily: POST /search
     Tavily-->>HalSearch: 要約 / 失敗
     HalSearch-->>Main: チャンネル経由で結果
+    Main->>Proto: build_function_call_output() / build_response_create()
+    Proto->>API: function_call_output ＋ response.create
+  end
+
+  opt モデルが記憶を求めた場合（remember_topic / remember_summary）
+    API-->>Proto: response.done（function_call）
+    Proto-->>Main: ToolCallRequested
+    Main->>Mem: remember_topic() / remember_summary()
+    Note over Main: 書き出しは待機に戻ってから（flush_memory）
     Main->>Proto: build_function_call_output() / build_response_create()
     Proto->>API: function_call_output ＋ response.create
   end

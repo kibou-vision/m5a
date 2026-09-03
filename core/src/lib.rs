@@ -10,6 +10,7 @@ pub mod greeting;
 pub mod guardrail;
 pub mod layout;
 pub mod logbook;
+pub mod memory;
 pub mod module_status;
 pub mod ports;
 pub mod realtime;
