@@ -622,7 +622,7 @@ impl Runtime {
             return;
         };
 
-        log::info!("記憶（短期）: {topic}");
+        log::info!("記憶（短期）: {}", memory::preview(&topic));
         self.memory.remember_topic(&topic);
         self.memory_dirty = true;
         self.finish_tool_call(call_id, "おぼえました");
